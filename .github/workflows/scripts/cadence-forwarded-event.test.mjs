@@ -36,6 +36,15 @@ const fixture = (eventName = "pull_request_review", action = "submitted", fork =
 };
 const resolve = f => resolveCadenceEvent(f);
 
+test("forwarded review accepts only the client's current default branch", async () => {
+  const f = fixture();
+  f.context.payload.repository = { default_branch: "release/next" };
+  f.context.ref = "refs/heads/release/next";
+  assert.equal((await resolve(f)).eventName, "pull_request_review");
+  f.context.ref = "refs/heads/main";
+  await assert.rejects(resolve(f));
+});
+
 for (const fork of [false, true]) {
   for (const [eventName, action] of [
     ["pull_request_target", "opened"], ["pull_request_target", "synchronize"], ["pull_request_target", "ready_for_review"],
@@ -127,7 +136,7 @@ test("bot editing a human's feedback cannot supply that human's authority", asyn
   assert.equal(result.skipReason, "non-human-feedback-editor");
 });
 
-test("workflow boundaries keep PR ingress secret-free and every privileged job on main", () => {
+test("workflow boundaries keep PR ingress secret-free and every privileged job on the trusted default branch", () => {
   const read = name => yaml.load(readFileSync(new URL(`../${name}.yml`, import.meta.url), "utf8"));
   const ingress = read("cadence-review-ingress");
   assert.deepEqual(ingress.permissions, {});
@@ -143,10 +152,11 @@ test("workflow boundaries keep PR ingress secret-free and every privileged job o
   assert.equal(events.jobs.forward, undefined);
   assert.deepEqual(handoff.on.workflow_run.workflows, ["Cadence Review Ingress"]);
   for (const job of [events.jobs.route, handoff.jobs["review-handoff"]]) {
-    assert.match(job.if, /refs\/heads\/main.*workflow_run.conclusion/);
+    assert.match(job.if, /github.event.repository.default_branch.*workflow_run.conclusion/);
     assert.match(job.if, /fromJSON\(github.event.workflow_run.display_title\).eligible/);
     assert.equal(job.environment, "cadence-controller");
-    assert.equal(job.steps[0].with.ref, "main");
+    assert.equal(job.steps[0].with.repository, "1000lines/symphony-client-workflows");
+    assert.equal(job.steps[0].with.ref, "${{ inputs.helpers-ref || 'alpha' }}");
     assert.equal(job.steps[0].with["persist-credentials"], false);
     assert.match(job.steps[1].uses, /^actions\/github-script@/);
     assert.match(job.steps[1].with.script, /cadence-forwarded-event.mjs/);

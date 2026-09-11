@@ -298,7 +298,8 @@ test("bodyless changes-requested reviews accept GitHub null bodies but reject ma
 test("feedback routing jobs use trusted checkout and the existing App without a PAT fallback", () => {
   for (const name of ["cadence-linear-rework", "cadence-ai-review-events"]) {
     const workflow = readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), "utf8");
-    assert.match(workflow, /ref: main/);
+    assert.match(workflow, /repository: 1000lines\/symphony-client-workflows/);
+    assert.match(workflow, /ref: \$\{\{ inputs.helpers-ref \|\| 'alpha' \}\}/);
     assert.match(workflow, /persist-credentials: false/);
     assert.match(workflow, /environment: cadence-controller/);
     assert.match(workflow, /app-id: \$\{\{ vars.CADENCE_APP_ID \}\}/);

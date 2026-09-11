@@ -3,6 +3,28 @@ name: Cadence AI Review
 # Resolve the PR set, then call the same reviewer used by the event bridge.
 
 on:
+  workflow_call:
+    secrets:
+      CADENCE_APP_PRIVATE_KEY:
+        required: true
+      CADENCE_OPENAI_API_KEY:
+        required: false
+      CADENCE_AI_REVIEW_ANTHROPIC_API_KEY:
+        required: false
+      CADENCE_LINEAR_API_TOKEN:
+        required: false
+    inputs:
+      helpers-ref:
+        description: "Reviewed symphony-client-workflows revision providing the trusted review helpers."
+        type: string
+        required: false
+        default: alpha
+      pr_numbers:
+        type: string
+        required: false
+      review_label:
+        type: string
+        required: false
   workflow_dispatch:
     inputs:
       pr_numbers:
@@ -21,13 +43,14 @@ permissions:
   pull-requests: write
 
 env:
+  GH_REPO: ${{ github.repository }}
   SYMPHONY_BOT_USER: ${{ vars.SYMPHONY_BOT_USER || 'example-symphony-bot' }}
   CADENCE_REVIEWER: ${{ vars.CADENCE_REVIEWER || 'example-cadence-bot' }}
   SYMPHONY_REPOSITORY_OWNER: ${{ vars.SYMPHONY_REPOSITORY_OWNER || github.repository_owner }}
 
 jobs:
   resolve:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     name: Resolve PR list
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -101,7 +124,11 @@ jobs:
         pr_number: ${{ fromJson(needs.resolve.outputs.pr_numbers) }}
     uses: ./.github/workflows/cadence-ai-review-trigger.yml
     with:
+      helpers-ref: ${{ inputs.helpers-ref || 'alpha' }}
       pr_number: ${{ matrix.pr_number }}
       trigger_source: workflow_dispatch.group
-    # Required for the callee's protected environment secrets: actions/runner#4453.
-    secrets: inherit
+    secrets:
+      CADENCE_APP_PRIVATE_KEY: ${{ secrets.CADENCE_APP_PRIVATE_KEY }}
+      CADENCE_OPENAI_API_KEY: ${{ secrets.CADENCE_OPENAI_API_KEY }}
+      CADENCE_AI_REVIEW_ANTHROPIC_API_KEY: ${{ secrets.CADENCE_AI_REVIEW_ANTHROPIC_API_KEY }}
+      CADENCE_LINEAR_API_TOKEN: ${{ secrets.CADENCE_LINEAR_API_TOKEN }}

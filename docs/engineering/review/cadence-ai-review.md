@@ -10,7 +10,7 @@ ordinary human PR review and from the general review-agent methodology.
 
 The review logic lives in the `cadence-ai-review` skill
 (`.claude/skills/cadence-ai-review/`). The GitHub workflows provision
-credentials and run Claude Code against that skill. Cadence writes detailed
+credentials and run Codex or Claude against that skill. Cadence writes detailed
 review state to one Linear comment headed `## Cadence Workpad`, then posts one
 concise GitHub PR review per completed pass (`APPROVE` when clean, otherwise `COMMENT`;
 never `REQUEST_CHANGES`).
@@ -19,7 +19,7 @@ never `REQUEST_CHANGES`).
 
 Normal human handoff requires passing required CI and a fresh Cadence review of
 the current PR head, a closed mandatory-feedback ledger, a clean task branch,
-and a PR marked ready from draft. The Claude runner publishes `APPROVE` when
+and a PR marked ready from draft. The selected provider publishes `APPROVE` when
 there are no blocker or human-needed findings, otherwise `COMMENT`. Record the
 reviewer, reviewed SHA, verdict and matching Cadence workpad. Human approval and
 merge own final acceptance; Cadence approval does not replace required human
@@ -124,26 +124,21 @@ The event bridge and manual PR matrix both call
 [the existing reviewer](../../../.github/workflows/cadence-ai-review-trigger.yml)
 through GitHub's native `workflow_call`. Normal routing does not remove and
 re-add a bot review request. The reviewer already reads current PR state, runs
-Claude, updates its workpad and applies its existing review cap and handoff.
+the selected provider, updates its workpad and applies its existing review cap and handoff.
 
 Events first run the secret-free `cadence-review-ingress.yml`. Its JSON title
 contains selectors, never authority. The `workflow_run` consumers execute on
-trusted `main`, read current PR/feedback through `actions/github-script`, and
+the trusted default branch, read current PR/feedback through `actions/github-script`, and
 verify the original author's write permission. A failed or denied router cannot
-start the dependent review job. Keep `cadence-controller` restricted to `main`.
+start the dependent review job. Keep `cadence-controller` restricted to the caller's default branch.
 
 The reusable call retains the caller's event and actor. GitHub-identified bot
 initiators may enter the provider's bot allowlist; humans still pass the provider's
-independent write-permission check. Reviews use the configured publishing
-credential. Both callers use `secrets: inherit`: explicit mappings left the
-protected environment key empty in live reusable runs, matching
-[actions/runner#4453](https://github.com/actions/runner/issues/4453).
-Inheritance exposes repository secrets to the trusted reviewer; its main-only
-`cadence-controller` environment supplies the signing key. Keep the key there,
-not in repository secrets or job outputs.
-See [GitHub's reusable workflow secret rules](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#using-inputs-and-secrets-in-a-reusable-workflow).
-Manual calls and legacy review requests
-retain their existing actor checks. All review execution requires `refs/heads/main`.
+independent write-permission check. Both providers publish with the minted
+Cadence App token and share the current-head outcome verifier and check lifecycle.
+All review execution requires the caller's trusted default branch. Explicitly
+pass the four named review secrets through event/manual and trigger boundaries;
+keep the protected environment for admission, without shadowing those secrets.
 
 GitHub's repository/PR concurrency group keeps one active review and one pending
 review (`queue: single`). New arrivals replace intermediate pending jobs without
@@ -183,8 +178,8 @@ the repository's automatic `GITHUB_TOKEN` for `markPullRequestReadyForReview`.
 The finish job requests `contents:write` and `pull-requests:write`; the event
 and manual reusable-workflow callers must permit both, since a callee cannot
 increase its caller's permissions. Other jobs retain their narrower grants.
-The privileged finish job runs only on trusted `main`, checks out `main`
-without persisted credentials, and rechecks the head before readying a draft.
+The privileged finish job runs only on the caller's trusted default branch,
+checks out the reviewed shared helper revision without persisted credentials, and rechecks the head before readying a draft.
 It does not execute PR code, write contents, change workflows, or merge.
 The shared Cadence App does not need an additional grant or credential.
 
@@ -244,7 +239,7 @@ The stale-approval fallback runs inside the reviewer.
 
 CI wakeups and `cadence-linear-rework.yml` keep their existing responsibilities.
 There is no second CI evaluator, Linear state machine or human-invitation engine.
-Review execution uses Claude. Deployment evidence includes an authorized
+Review execution selects Codex when an OpenAI key is present, otherwise Claude. Deployment evidence includes an authorized
 feedback event, an unauthorized author, and a manual selection, with Actions
 links and actual handoff results. Local tests do not prove live environment
 admission or provider execution.
@@ -288,60 +283,69 @@ making an authoritative decision.
 
 ## Required Configuration
 
-Set these values in Settings → Secrets and variables → Actions → Secrets.
-Required when using the workflow that consumes them; there are no credential
-defaults. All values come from adopter-owned accounts. Never commit them.
+Store credentials in Settings → Secrets and variables → Actions at repository
+scope, or organization scope selected for the client. No values belong in Copier
+answers or committed files. Forward named secrets explicitly at every reusable
+hop; environment-only secrets cannot be forwarded from a caller job.
 
-Human feedback routing and the single-PR review trigger require the protected
-`cadence-controller` Environment's `CADENCE_APP_ID` variable and
-`CADENCE_APP_PRIVATE_KEY` secret. See the
-[App permission requirements](./github-actor-classification.md#app-installation-and-rollout).
+| Actions secret | Consumer / mapping |
+| --- | --- |
+| `CADENCE_APP_PRIVATE_KEY` | Required Cadence App token minting in routing, review/check publication, handoff and cleanup |
+| `CADENCE_OPENAI_API_KEY` | `openai/codex-action` input `openai-api-key` (the provider's OpenAI API key, often named `OPENAI_API_KEY` outside Actions) |
+| `CADENCE_AI_REVIEW_ANTHROPIC_API_KEY` | `anthropics/claude-code-action` input `anthropic_api_key` |
+| `CADENCE_LINEAR_API_TOKEN` | Issue acquisition and Cadence workpad; required by the handoff/wakeup callers, optional for the review's workpad write |
 
-Repository secrets:
+| Keys reaching the review job | Result |
+| --- | --- |
+| OpenAI only | Codex |
+| Anthropic only | Claude |
+| Both | Codex |
+| Neither | Clear configuration error before checkout, App token minting or review work |
 
-- `CADENCE_AI_REVIEW_ANTHROPIC_API_KEY`: Claude API key for the review.
-- `CADENCE_LINEAR_API_TOKEN`: Linear API token used by
-  `scripts/fetch-linear-issue.mjs` to read issue context, by
-  `scripts/cadence-linear-workpad.mjs` to write the Cadence workpad, and by the
-  review workflow when optional Linear-side Cadence state can be written.
-- `GOOGLE_SA_KEY`: a Google service-account JSON key. Staged to a file and read
-  by `scripts/fetch-google-doc.mjs` to export linked design docs.
+Provider declarations are individually optional at `workflow_call`; the either/or
+requirement is checked at runtime. No dummy Anthropic key is needed. Authentication
+failure in the selected provider fails the run and never switches providers.
+The onboarding reviewer answer records a preference; it does not override this
+credential-based selection.
 
-- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: the AWS access-key ID and
-  paired secret used only by the host AMI workflow. Supply a principal authorized
-  to inspect images in the configured account. These are separate from Cadence's
-  review credentials and from the host's AWS Secrets Manager JSON bundles.
+Keep `cadence-controller` restricted to the client's default branch and free of
+secrets that shadow the explicitly forwarded repository/organization secrets.
+Configure repository Actions variables:
 
-Set repository variables in Settings → Secrets and variables → Actions →
-Variables. Identity values must name the accounts behind the supplied tokens:
+- `CADENCE_APP_ID`: the installed Cadence App ID. See the
+  [App grants](./github-actor-classification.md#app-installation-and-rollout).
+- `SYMPHONY_BOT_USER`: the Symphony author's GitHub login, including `[bot]` for Apps.
+- `CADENCE_REVIEWER`: the Cadence App login, including `[bot]`. Publication derives
+  the authoritative login from the minted App slug, not this routing setting.
+- `SYMPHONY_REPOSITORY_OWNER`: optional; defaults to the caller's repository owner.
+- `CADENCE_CODEX_MODEL`: optional; unset uses the maintained Codex CLI default.
+- `CADENCE_CLAUDE_MODEL`: required only for Claude; the existing approved model
+  requirement remains `claude-opus-5`. OpenAI-only runs do not require this value.
 
-- `SYMPHONY_BOT_USER`: coding bot GitHub login. Required for live attribution;
-  synthetic fallback `example-symphony-bot`.
-- `CADENCE_REVIEWER`: legacy review-request login and actor exclusion;
-  synthetic fallback `example-cadence-bot`. Publishing identity is derived from
-  the minted App, independently of this compatibility setting.
-- `SYMPHONY_REPOSITORY_OWNER`: GitHub organization slug used for team lookup.
-  Optional in workflows (default: `github.repository_owner`); export it for
-  standalone helpers, whose fallback `example-org` is synthetic.
-- `CADENCE_GIT_EMAIL`: review bot commit email for the AMI workflow. Required
-  for real attribution; synthetic fallback `example-cadence-bot@users.noreply.github.com`.
-- `AWS_ACCOUNT_ID`: 12 decimal digits identifying the host account. Required
-  for the AMI workflow; no default.
-- `SYMPHONY_HUMAN_LEAD`: GitHub login to assign AMI update PRs. Optional; default:
-  unset (no assignee).
+The maintained [Codex Action](https://developers.openai.com/codex/github-action)
+uses `openai-api-key` and a trusted Codex home with workspace-write sandboxing
+and network access for GitHub/Linear source acquisition and publication. Sudo is
+dropped before execution. Both Actions receive the same review prompt and the
+same short-lived App/Linear credentials. They read target source through GitHub;
+the checkout contains trusted shared review helpers, not PR-controlled code.
+Pass a reviewed shared revision as `helpers-ref`, matching the reusable workflow
+ref. The client template supplies event, direct/manual, group, handoff and cleanup
+callers. Ingress needs no provider or App secrets. Handoff needs App/Linear;
+cleanup needs only App. GITHUB_TOKEN is supplied by Actions; no legacy bot PAT is
+required.
 
-Review model variable:
-
-- `CADENCE_CLAUDE_MODEL`: required Claude model for the review. The trigger
-  preflight approves `claude-opus-5` for the Opus 5 review requirement and fails
-  before Claude runs when the variable is unset or points to an unapproved
-  model.
+After accepting the shared workflow and template PRs, publish their reviewed
+revisions and run Copier update for adopters. Guided credential provisioning and
+live readiness verification belong to [100-62](https://linear.app/1000lines/issue/100-62).
+Tests of provider selection and forwarding are separate from a real provider
+review, App check and Linear handoff; record each live workflow run before
+claiming readiness.
 
 ## Identities
 
 - **Review App**: the configured Cadence App authors reviews with a short-lived,
   single-repository installation token. The trusted token Action's `app-slug`
-  determines `CADENCE_REVIEWER_LOGIN` (`<app-slug>[bot]`) for Claude, verification,
+  determines `CADENCE_REVIEWER_LOGIN` (`<app-slug>[bot]`) for both providers, verification,
   advisory results and Linear handoff. Native review requires no
   `CADENCE_BOT_GITHUB_TOKEN`; manual PR-list reads use `GITHUB_TOKEN`.
   The review token requests metadata, contents and Actions read plus
