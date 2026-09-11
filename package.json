@@ -1,0 +1,16 @@
+{
+  "name": "symphony-client-workflows",
+  "private": true,
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "test": "node --test scripts/*.test.mjs scripts/symphony/*.test.mjs .github/workflows/scripts/*.test.mjs scripts/symphony/runtime-bundle/review-axes/*.test.mjs"
+  },
+  "dependencies": {
+    "js-yaml": "4.3.2"
+  },
+  "devDependencies": {
+    "prettier": "2.8.8"
+  }
+}

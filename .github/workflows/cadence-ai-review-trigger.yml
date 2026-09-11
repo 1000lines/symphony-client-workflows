@@ -1,0 +1,817 @@
+name: Cadence AI Review Trigger
+
+# Event and manual callers invoke this reusable workflow directly. Keep the
+# review-request entry point for existing integrations until they migrate.
+
+on:
+  pull_request_target:
+    types: [review_requested, closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review."
+        required: true
+        type: string
+      trigger_source:
+        description: "Why this review was triggered."
+        required: false
+        default: "workflow_dispatch"
+        type: string
+      trigger_actor:
+        description: "GitHub actor that caused the trigger, when known."
+        required: false
+        default: ""
+        type: string
+  workflow_call:
+    secrets:
+      CADENCE_AI_REVIEW_ANTHROPIC_API_KEY:
+        required: true
+      CADENCE_LINEAR_API_TOKEN:
+        required: false
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      trigger_source:
+        required: false
+        default: "workflow_call"
+        type: string
+      trigger_actor:
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  REPO_SLUG: ${{ github.repository }}
+  SYMPHONY_BOT_USER: ${{ vars.SYMPHONY_BOT_USER || 'example-symphony-bot' }}
+  CADENCE_REVIEWER: ${{ vars.CADENCE_REVIEWER || 'example-cadence-bot' }}
+  SYMPHONY_REPOSITORY_OWNER: ${{ vars.SYMPHONY_REPOSITORY_OWNER || github.repository_owner }}
+
+jobs:
+  cancel-closed:
+    if: github.event_name == 'pull_request_target' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    concurrency:
+      group: cadence-ai-review-${{ github.repository }}-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+      queue: single # Closing the PR replaces pending review work.
+    steps:
+      - run: echo "PR closed; cancelling its Cadence review."
+
+  accept:
+    name: "Accept PR #${{ inputs.pr_number || github.event.pull_request.number }}"
+    if: >-
+      ${{
+        github.ref == 'refs/heads/main' &&
+        (github.event_name != 'pull_request_target' ||
+        (
+          github.event.action == 'review_requested' &&
+          github.event.pull_request.state == 'open' &&
+          github.event.pull_request.user.login == (vars.SYMPHONY_BOT_USER || 'example-symphony-bot') &&
+          github.event.requested_reviewer.login == (vars.CADENCE_REVIEWER || 'example-cadence-bot') &&
+          (
+            contains(github.event.pull_request.labels.*.name, 'symphony') ||
+            github.actor == (vars.CADENCE_REVIEWER || 'example-cadence-bot')
+          ) &&
+          github.actor != 'claude[bot]' &&
+          github.actor != 'dependabot[bot]' &&
+          (
+            github.actor == (vars.CADENCE_REVIEWER || 'example-cadence-bot') ||
+            github.actor == (vars.SYMPHONY_BOT_USER || 'example-symphony-bot') ||
+            github.event.sender.type == 'Bot' ||
+            !endsWith(github.actor, '[bot]')
+          )
+        ))
+      }}
+    environment: cadence-controller
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: cadence-check-publication-${{ github.repository }}-pr-${{ inputs.pr_number || github.event.pull_request.number }}
+      cancel-in-progress: false
+      queue: max # Short admission/publication lock; never held during review.
+    outputs:
+      request: ${{ steps.prepare.outputs.request }}
+      check_id: ${{ steps.queued.outputs.check_id }}
+    steps:
+      - name: Validate PR number
+        env:
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        run: |
+          if ! printf '%s' "${PR_NUMBER}" | grep -Eq '^[0-9]+$'; then
+            echo "::error::pr_number must be a positive integer."
+            exit 1
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Mint existing Cadence App token
+        id: app-token
+        uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # v2.1.1
+        with:
+          app-id: ${{ vars.CADENCE_APP_ID }}
+          private-key: ${{ secrets.CADENCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-metadata: read
+          permission-pull-requests: read
+          permission-checks: write
+
+      # Token creation supplies the trusted App slug. Other App actors stop
+      # here, before fetching feedback or performing review mutations.
+      - name: Verify App review requester
+        if: github.event_name == 'pull_request_target'
+        env:
+          REQUEST_ACTOR: ${{ github.actor }}
+          REQUEST_ACTOR_TYPE: ${{ github.event.sender.type }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          if [[ "${REQUEST_ACTOR_TYPE}" == "Bot" || "${REQUEST_ACTOR}" == *'[bot]' ]]; then
+            if [[ -z "${APP_SLUG}" || "${REQUEST_ACTOR}" != "${APP_SLUG}[bot]" ]]; then
+              echo "::error::Review request is not from the configured Cadence App."
+              exit 1
+            fi
+          fi
+
+      - name: Prepare durable check pointer
+        id: prepare
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { checkRequest } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/cadence-review-check.mjs`);
+            const number = Number(process.env.PR_NUMBER);
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: number });
+            if (pr.state !== 'open') return;
+            const request = checkRequest({ repo: context.repo, serverUrl: context.serverUrl,
+              runId: context.runId, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT) }, number, pr.head.sha);
+            const json = JSON.stringify(request);
+            require('node:fs').writeFileSync(`${process.env.RUNNER_TEMP}/cadence-check-${number}.json`, json);
+            core.setOutput('request', json);
+
+      # Save before creating: even cancellation between API creation and output
+      # publication leaves workflow_run enough information to finish the check.
+      - name: Save check recovery pointer
+        if: steps.prepare.outputs.request != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cadence-check-${{ github.run_attempt }}-${{ inputs.pr_number || github.event.pull_request.number }}
+          path: ${{ runner.temp }}/cadence-check-${{ inputs.pr_number || github.event.pull_request.number }}.json
+          if-no-files-found: error
+
+      - name: Publish queued Cadence check
+        id: queued
+        if: steps.prepare.outputs.request != ''
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          CHECK_REQUEST: ${{ steps.prepare.outputs.request }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { queueCheck } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/cadence-review-check.mjs`);
+            const check = await queueCheck(github, JSON.parse(process.env.CHECK_REQUEST), '${{ vars.CADENCE_APP_ID }}');
+            core.setOutput('check_id', check.id);
+
+  review:
+    name: "Review PR #${{ inputs.pr_number || github.event.pull_request.number }}"
+    needs: accept
+    if: github.ref == 'refs/heads/main' && needs.accept.outputs.check_id != ''
+    environment: cadence-controller
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: cadence-ai-review-${{ github.repository }}-pr-${{ inputs.pr_number || github.event.pull_request.number }}
+      cancel-in-progress: false
+      queue: single # Replace intermediate pending reviews; reacquire all feedback on start.
+    outputs:
+      ran_review: ${{ steps.plan.outputs.run_claude }}
+      baseline: ${{ steps.started.outputs.baseline }}
+    steps:
+      - name: Validate PR number
+        env:
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        run: |
+          if ! printf '%s' "${PR_NUMBER}" | grep -Eq '^[0-9]+$'; then
+            echo "::error::pr_number must be a positive integer."
+            exit 1
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Mint existing Cadence App token
+        id: app-token
+        uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # v2.1.1
+        with:
+          app-id: ${{ vars.CADENCE_APP_ID }}
+          private-key: ${{ secrets.CADENCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-metadata: read
+          permission-pull-requests: write
+          permission-issues: write
+          permission-contents: read
+          permission-actions: read
+          permission-checks: write
+
+      - name: Verify Cadence publishing identity
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          CADENCE_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const slug = process.env.CADENCE_APP_SLUG;
+            if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug || '')) throw new Error('Missing or invalid minted Cadence App slug');
+            const { data } = await github.request('GET /installation/repositories');
+            const target = `${context.repo.owner}/${context.repo.repo}`;
+            if (data.total_count !== 1 || data.repositories?.[0]?.full_name !== target) {
+              throw new Error('Cadence App token must be scoped to the target repository');
+            }
+            core.exportVariable('CADENCE_REVIEWER_LOGIN', `${slug}[bot]`);
+
+      - name: Start accepted check
+        id: started
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          CHECK_REQUEST: ${{ needs.accept.outputs.request }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { startCheck } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/cadence-review-check.mjs`);
+            const result = await startCheck(github, JSON.parse(process.env.CHECK_REQUEST), '${{ vars.CADENCE_APP_ID }}');
+            core.setOutput('active', result.active);
+            core.setOutput('baseline', result.baseline);
+
+      - name: Fetch PR review state
+        id: review_state
+        env:
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          state_file="${RUNNER_TEMP}/cadence-review-state.json"
+          node scripts/fetch-pr-review-state.mjs "${PR_NUMBER}" > "${state_file}"
+          cat "${state_file}"
+
+          printf 'decision=%s\n' "$(jq -r '.decision' "${state_file}")" >> "${GITHUB_OUTPUT}"
+          printf 'review_status=%s\n' "$(jq -r '.reviewStatus' "${state_file}")" >> "${GITHUB_OUTPUT}"
+          printf 'stale_approval=%s\n' "$(jq -r '.staleApproval' "${state_file}")" >> "${GITHUB_OUTPUT}"
+          printf 'since_count=%s\n' "$(jq -r '(.since // []) | length' "${state_file}")" >> "${GITHUB_OUTPUT}"
+          printf 'human_grounded_count=%s\n' "$(jq -r '(.humanGroundedSince // []) | length' "${state_file}")" >> "${GITHUB_OUTPUT}"
+          printf 'last_review_submitted_at=%s\n' "$(jq -r '.lastReview.submittedAt // ""' "${state_file}")" >> "${GITHUB_OUTPUT}"
+          echo "state_file=${state_file}" >> "${GITHUB_OUTPUT}"
+
+      - name: Fetch PR metadata and labels
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          pr_file="${RUNNER_TEMP}/cadence-pr.json"
+          gh pr view "${PR_NUMBER}" \
+            --repo "${GH_REPO}" \
+            --json state,title,body,headRefName,headRefOid,labels,assignees \
+            > "${pr_file}"
+
+          issue_identifier="$(
+            jq -r '[.title, .body, .headRefName] | map(. // "") | join("\n")' "${pr_file}" \
+              | grep -Eo '[A-Z0-9]+-[0-9]+' \
+              | head -n 1 || true
+          )"
+
+          printf 'issue_identifier=%s\n' "${issue_identifier}" >> "${GITHUB_OUTPUT}"
+          printf 'state=%s\n' "$(jq -r '.state' "${pr_file}")" >> "${GITHUB_OUTPUT}"
+          printf 'head_sha=%s\n' "$(jq -r '.headRefOid' "${pr_file}")" >> "${GITHUB_OUTPUT}"
+          printf 'has_symphony_label=%s\n' "$(jq -r 'any(.labels[].name; . == "symphony")' "${pr_file}")" >> "${GITHUB_OUTPUT}"
+          printf 'current_cadence_run=%s\n' "$(
+            jq -r '[.labels[].name | select(test("^cadence-loop-[0-9]+$")) | sub("^cadence-loop-"; "") | tonumber] | max // 0' "${pr_file}"
+          )" >> "${GITHUB_OUTPUT}"
+          printf 'cadence_labels=%s\n' "$(
+            jq -cr '[.labels[].name | select(test("^cadence-loop-[0-9]+$"))]' "${pr_file}"
+          )" >> "${GITHUB_OUTPUT}"
+          printf 'assignees_json=%s\n' "$(
+            jq -cr '[.assignees[].login]' "${pr_file}"
+          )" >> "${GITHUB_OUTPUT}"
+          printf 'metadata_file=%s\n' "${pr_file}" >> "${GITHUB_OUTPUT}"
+
+      # Dry-run cap validation command: re-request `example-cadence-bot` on a
+      # sandbox PR already carrying cadence-loop-3. Expected result: request the
+      # PR assignee for review, update the workpad when Linear credentials
+      # exist, and skip the Claude review step.
+      - name: Plan visible Cadence review decision
+        if: steps.started.outputs.active == 'true' && steps.pr.outputs.state == 'OPEN' && steps.pr.outputs.head_sha == fromJSON(needs.accept.outputs.request).head
+        id: plan
+        env:
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TRIGGER_SOURCE: ${{ inputs.trigger_source || format('{0}.{1}', github.event_name, github.event.action) }}
+          # Dispatch metadata must not establish human authority for loop resets.
+          TRIGGER_ACTOR: ${{ github.actor }}
+          REVIEW_STATE_FILE: ${{ steps.review_state.outputs.state_file }}
+          REVIEW_DECISION: ${{ steps.review_state.outputs.decision }}
+          REVIEW_STATE_SINCE_COUNT: ${{ steps.review_state.outputs.since_count }}
+          HUMAN_GROUNDED_COUNT: ${{ steps.review_state.outputs.human_grounded_count }}
+          HAS_SYMPHONY_LABEL: ${{ steps.pr.outputs.has_symphony_label }}
+          CURRENT_CADENCE_RUN: ${{ steps.pr.outputs.current_cadence_run }}
+          LAST_REVIEW_SUBMITTED_AT: ${{ steps.review_state.outputs.last_review_submitted_at }}
+          ISSUE_IDENTIFIER: ${{ steps.pr.outputs.issue_identifier }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from "node:fs";
+          import { planCadenceReviewRun } from "./.github/workflows/scripts/cadence-ai-review-route-event.mjs";
+
+          const booleanFrom = (value) => String(value).toLowerCase() === "true";
+          const numberFrom = (value) => {
+            const parsed = Number(value);
+            return Number.isFinite(parsed) ? parsed : 0;
+          };
+          const plan = planCadenceReviewRun({
+            hasSymphonyLabel: booleanFrom(process.env.HAS_SYMPHONY_LABEL),
+            reviewDecision: process.env.REVIEW_DECISION,
+            humanGroundedCount: numberFrom(process.env.HUMAN_GROUNDED_COUNT),
+            currentCadenceRun: numberFrom(process.env.CURRENT_CADENCE_RUN),
+            triggerActor: process.env.TRIGGER_ACTOR,
+            triggerSource: process.env.TRIGGER_SOURCE,
+            lastReviewSubmittedAt: process.env.LAST_REVIEW_SUBMITTED_AT,
+          });
+
+          for (const [name, value] of Object.entries(plan)) {
+            appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`);
+          }
+          NODE
+
+          printf 'issue_identifier=%s\n' "${ISSUE_IDENTIFIER}" >> "${GITHUB_OUTPUT}"
+          printf 'head_sha=%s\n' "${HEAD_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Dismiss or surface stale Cadence approvals before re-review
+        id: stale_approvals
+        if: steps.plan.outputs.run_claude == 'true' && steps.review_state.outputs.stale_approval == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          TRIGGER_SOURCE: ${{ inputs.trigger_source || format('{0}.{1}', github.event_name, github.event.action) }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { planStaleApprovalVisibility } = await import(
+              `${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/cadence-ai-review-route-event.mjs`
+            );
+            const { owner, repo } = context.repo;
+            const number = Number(process.env.PR_NUMBER);
+            const triggerSource = process.env.TRIGGER_SOURCE || "";
+            const bot = process.env.CADENCE_REVIEWER_LOGIN;
+            const visibleReviewRequest =
+              triggerSource === "pull_request_target.review_requested";
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner,
+              repo,
+              pull_number: number,
+              per_page: 100,
+            });
+            const approvals = reviews.filter(
+              (review) => review.user?.login === bot && review.state === "APPROVED"
+            );
+            const dismissed = [];
+            const dismissFailed = [];
+
+            for (const review of approvals) {
+              try {
+                await github.rest.pulls.dismissReview({
+                  owner,
+                  repo,
+                  pull_number: number,
+                  review_id: review.id,
+                  message:
+                    "Cadence approval is stale because a new review-causing event is queued; Cadence will re-review current PR state.",
+                });
+                dismissed.push(review.id);
+              } catch (error) {
+                dismissFailed.push(`${review.id}: ${error.message}`);
+              }
+            }
+
+            let rerequested = false;
+            let rerequestError = "";
+            if (dismissFailed.length > 0 && !visibleReviewRequest) {
+              try {
+                await github.rest.pulls.requestReviewers({
+                  owner,
+                  repo,
+                  pull_number: number,
+                  reviewers: [bot],
+                });
+                rerequested = true;
+              } catch (error) {
+                if (/already.*request|review.*already|already.*review/i.test(error.message || "")) {
+                  rerequested = true;
+                } else {
+                  rerequestError = error.message;
+                }
+              }
+            }
+
+            const visibility = planStaleApprovalVisibility({
+              dismissFailedCount: dismissFailed.length,
+              visibleReviewRequest,
+              rerequested,
+            });
+
+            core.setOutput("dismissed_count", String(dismissed.length));
+            core.setOutput("dismiss_failed_count", String(dismissFailed.length));
+            core.setOutput("rerequested_count", rerequested ? "1" : "0");
+            core.setOutput("review_request_visible_count", visibleReviewRequest ? "1" : "0");
+            core.setOutput("failed_count", visibility.failed_count);
+            if (dismissFailed.length > 0 && visibleReviewRequest) {
+              core.notice(
+                `Could not dismiss stale Cadence approvals, but the Cadence review request that triggered this run is the visible pending re-review state: ${dismissFailed.join("; ")}`
+              );
+            } else if (dismissFailed.length > 0 && rerequested) {
+              core.notice(
+                `Could not dismiss stale Cadence approvals, but re-requested Cadence review so stale state is visible: ${dismissFailed.join("; ")}`
+              );
+            } else if (visibility.failed_count !== "0") {
+              core.warning(
+                `Could not dismiss or re-request stale Cadence approvals: ${dismissFailed.join("; ")}; re-request error: ${rerequestError}`
+              );
+            }
+
+      - name: Update cadence loop label
+        if: steps.plan.outputs.run_claude == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          NEXT_CADENCE_LABEL: ${{ steps.plan.outputs.next_cadence_label }}
+          CADENCE_LABELS: ${{ steps.pr.outputs.cadence_labels }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${NEXT_CADENCE_LABEL}" ]; then
+            echo "::error::Expected a cadence-loop-N label before running Cadence."
+            exit 1
+          fi
+
+          if ! gh api "/repos/${GITHUB_REPOSITORY}/labels/${NEXT_CADENCE_LABEL}" >/dev/null 2>&1; then
+            gh api \
+              --method POST \
+              "/repos/${GITHUB_REPOSITORY}/labels" \
+              -f name="${NEXT_CADENCE_LABEL}" \
+              -f color="6e7781" \
+              -f description="Cadence automated review loop counter." \
+              >/dev/null
+          fi
+
+          printf '%s\n' "${CADENCE_LABELS}" | jq -r '.[]' | while IFS= read -r label; do
+            if [ "${label}" != "${NEXT_CADENCE_LABEL}" ]; then
+              gh api \
+                --method DELETE \
+                "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/${label}" \
+                >/dev/null
+            fi
+          done
+
+          gh api \
+            --method POST \
+            "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" \
+            -f "labels[]=${NEXT_CADENCE_LABEL}" \
+            >/dev/null
+
+      - name: Request human review for Cadence stop condition
+        id: request_humans
+        if: steps.plan.outputs.request_human_review == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ASSIGNEES_JSON: ${{ steps.pr.outputs.assignees_json }}
+          HUMAN_REVIEW_REASON: ${{ steps.plan.outputs.human_review_reason }}
+        run: |
+          set -euo pipefail
+
+          request_plan_file="${RUNNER_TEMP}/cadence-human-review-request-plan.json"
+
+          REQUEST_PLAN_FILE="${request_plan_file}" node --input-type=module <<'NODE'
+          import { writeFileSync } from "node:fs";
+          import { humanReviewRequestFromAssignees } from "./scripts/cadence-linear-rework.mjs";
+
+          const assignees = JSON.parse(process.env.ASSIGNEES_JSON || "[]");
+          const plan = humanReviewRequestFromAssignees(assignees);
+          writeFileSync(process.env.REQUEST_PLAN_FILE, JSON.stringify(plan, null, 2));
+          NODE
+
+          target="$(jq -r '.target' "${request_plan_file}")"
+          reviewers_json="$(jq -cr '.reviewers' "${request_plan_file}")"
+          printf 'requested_reviewers=%s\n' "${reviewers_json}" >> "${GITHUB_OUTPUT}"
+
+          if [ "$(jq -r '.shouldRequest' "${request_plan_file}")" != "true" ]; then
+            message="${HUMAN_REVIEW_REASON:-Cadence requested human review.} $(jq -r '.warning' "${request_plan_file}")"
+            echo "::warning::${message}"
+            {
+              echo "warning_message<<CADENCE_WARNING"
+              printf '%s\n' "${message}"
+              echo "CADENCE_WARNING"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if ! output="$(
+            GH_REPO="${GITHUB_REPOSITORY}" \
+              REVIEWERS_JSON="${reviewers_json}" \
+              node .github/workflows/scripts/request-pr-reviewer.mjs \
+              2>&1
+          )"; then
+            message="${HUMAN_REVIEW_REASON:-Cadence requested human review.} Could not request human review from ${target}: ${output}"
+            echo "::warning::${message}"
+            {
+              echo "warning_message<<CADENCE_WARNING"
+              printf '%s\n' "${message}"
+              echo "CADENCE_WARNING"
+            } >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Write Cadence workpad planning state
+        if: always() && steps.plan.outputs.issue_identifier != ''
+        env:
+          ISSUE_IDENTIFIER: ${{ steps.plan.outputs.issue_identifier }}
+          STATUS: ${{ steps.plan.outputs.status }}
+          TRIGGER_SOURCE: ${{ inputs.trigger_source || format('{0}.{1}', github.event_name, github.event.action) }}
+          REVIEW_STATE: ${{ steps.plan.outputs.review_state }}
+          HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
+          PENDING_TRIGGER_STATE: ${{ steps.plan.outputs.pending_trigger_state }}
+          SKIPPED_REASON: ${{ steps.plan.outputs.skipped_reason }}
+          PREVIOUS_RUN: ${{ steps.plan.outputs.previous_run }}
+          PENDING_RERUN: ${{ steps.plan.outputs.pending_rerun }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TRIGGER_ACTOR: ${{ inputs.trigger_actor || github.actor }}
+          REVIEW_DECISION: ${{ steps.review_state.outputs.decision }}
+          REVIEW_STATUS: ${{ steps.review_state.outputs.review_status }}
+          STALE_APPROVAL: ${{ steps.review_state.outputs.stale_approval }}
+          REVIEW_STATE_SINCE_COUNT: ${{ steps.review_state.outputs.since_count }}
+          HUMAN_GROUNDED_COUNT: ${{ steps.review_state.outputs.human_grounded_count }}
+          CURRENT_CADENCE_RUN: ${{ steps.pr.outputs.current_cadence_run }}
+          CADENCE_LOOP_CAP: ${{ steps.plan.outputs.cadence_loop_cap }}
+          CADENCE_LOOP_RESET: ${{ steps.plan.outputs.cadence_loop_reset }}
+          AGENT_ACTOR: ${{ steps.plan.outputs.agent_actor }}
+          FORCE_REVIEW: ${{ steps.plan.outputs.force_review }}
+          REQUEST_HUMAN_REVIEW: ${{ steps.plan.outputs.request_human_review }}
+          HUMAN_REVIEW_REASON: ${{ steps.plan.outputs.human_review_reason }}
+          HUMAN_REVIEW_REQUESTED_REVIEWERS: ${{ steps.request_humans.outputs.requested_reviewers || '[]' }}
+          HUMAN_REVIEW_REQUEST_WARNING: ${{ steps.request_humans.outputs.warning_message }}
+          STALE_APPROVAL_DISMISSED_COUNT: ${{ steps.stale_approvals.outputs.dismissed_count || '0' }}
+          STALE_APPROVAL_DISMISS_FAILED_COUNT: ${{ steps.stale_approvals.outputs.dismiss_failed_count || '0' }}
+          STALE_APPROVAL_REREQUESTED_COUNT: ${{ steps.stale_approvals.outputs.rerequested_count || '0' }}
+          STALE_APPROVAL_REVIEW_REQUEST_VISIBLE_COUNT: ${{ steps.stale_approvals.outputs.review_request_visible_count || '0' }}
+          STALE_APPROVAL_VISIBILITY_FAILED_COUNT: ${{ steps.stale_approvals.outputs.failed_count || '0' }}
+          LINEAR_API_TOKEN: ${{ secrets.CADENCE_LINEAR_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${LINEAR_API_TOKEN}" ]; then
+            echo "::warning::Skipping optional Cadence Workpad write because CADENCE_LINEAR_API_TOKEN is not configured."
+            exit 0
+          fi
+          if ! jq -n \
+            --arg status "${STATUS}" \
+            --arg triggerSource "${TRIGGER_SOURCE}" \
+            --arg reviewState "${REVIEW_STATE}" \
+            --arg lastReviewedSha "${HEAD_SHA}" \
+            --arg pendingTriggerState "${PENDING_TRIGGER_STATE}" \
+            --arg skippedReason "${SKIPPED_REASON}" \
+            --arg previousRun "${PREVIOUS_RUN}" \
+            --arg pendingRerun "${PENDING_RERUN}" \
+            --arg triggerActor "${TRIGGER_ACTOR}" \
+            --arg concurrencyGroup "cadence-ai-review-${GITHUB_REPOSITORY}-pr-${PR_NUMBER}" \
+            --arg reviewStateDecision "${REVIEW_DECISION}" \
+            --arg reviewStatus "${REVIEW_STATUS}" \
+            --arg staleApproval "${STALE_APPROVAL}" \
+            --arg cadenceLoopReset "${CADENCE_LOOP_RESET}" \
+            --arg agentActor "${AGENT_ACTOR}" \
+            --arg forceReview "${FORCE_REVIEW}" \
+            --arg requestHumanReview "${REQUEST_HUMAN_REVIEW}" \
+            --arg humanReviewReason "${HUMAN_REVIEW_REASON}" \
+            --arg humanReviewRequestWarning "${HUMAN_REVIEW_REQUEST_WARNING}" \
+            --argjson prNumber "${PR_NUMBER}" \
+            --argjson reviewStateSinceCount "${REVIEW_STATE_SINCE_COUNT}" \
+            --argjson humanGroundedSinceCount "${HUMAN_GROUNDED_COUNT}" \
+            --argjson currentCadenceRun "${CURRENT_CADENCE_RUN}" \
+            --argjson cadenceLoopCap "${CADENCE_LOOP_CAP}" \
+            --argjson humanReviewRequestedReviewers "${HUMAN_REVIEW_REQUESTED_REVIEWERS}" \
+            --argjson staleApprovalDismissedCount "${STALE_APPROVAL_DISMISSED_COUNT}" \
+            --argjson staleApprovalDismissFailedCount "${STALE_APPROVAL_DISMISS_FAILED_COUNT}" \
+            --argjson staleApprovalRerequestedCount "${STALE_APPROVAL_REREQUESTED_COUNT}" \
+            --argjson staleApprovalReviewRequestVisibleCount "${STALE_APPROVAL_REVIEW_REQUEST_VISIBLE_COUNT}" \
+            --argjson staleApprovalVisibilityFailedCount "${STALE_APPROVAL_VISIBILITY_FAILED_COUNT}" \
+            '{
+              status: $status,
+              triggerSource: $triggerSource,
+              reviewState: $reviewState,
+              lastReviewedSha: $lastReviewedSha,
+              pendingTriggerState: $pendingTriggerState,
+              skippedEvents: (
+                if $skippedReason == "" then []
+                else [{reason: $skippedReason}]
+                end
+              ),
+              coordination: {
+                prNumber: $prNumber,
+                triggerActor: $triggerActor,
+                concurrencyGroup: $concurrencyGroup,
+                reviewStateDecision: $reviewStateDecision,
+                reviewStatus: $reviewStatus,
+                staleApproval: ($staleApproval == "true"),
+                reviewStateSinceCount: $reviewStateSinceCount,
+                humanGroundedSinceCount: $humanGroundedSinceCount,
+                currentCadenceRun: $currentCadenceRun,
+                cadenceLoopCap: $cadenceLoopCap,
+                cadenceLoopReset: ($cadenceLoopReset == "true"),
+                agentActor: ($agentActor == "true"),
+                forceReview: ($forceReview == "true"),
+                staleApprovalDismissedCount: $staleApprovalDismissedCount,
+                staleApprovalDismissFailedCount: $staleApprovalDismissFailedCount,
+                staleApprovalRerequestedCount: $staleApprovalRerequestedCount,
+                staleApprovalReviewRequestVisibleCount: $staleApprovalReviewRequestVisibleCount,
+                staleApprovalVisibilityFailedCount: $staleApprovalVisibilityFailedCount,
+                humanReview: {
+                  requested: ($requestHumanReview == "true"),
+                  reviewers: $humanReviewRequestedReviewers,
+                  reason: $humanReviewReason,
+                  action: (
+                    if $requestHumanReview == "true" then
+                      "Review the Cadence Workpad and PR state, then decide whether Symphony should rework, Cadence should re-review, or the PR is ready for human approval."
+                    else ""
+                    end
+                  )
+                }
+              }
+            }
+            + (if $previousRun != "" then {previousRun: $previousRun} else {} end)
+            + (if $pendingRerun != "" then {pendingRerun: $pendingRerun} else {} end)
+            + (
+              if $humanReviewRequestWarning == "" then {}
+              else {
+                humanReviewRequestWarning: {
+                  message: $humanReviewRequestWarning,
+                  status: "unknown"
+                }
+              }
+              end
+            )' \
+            | node scripts/cadence-linear-workpad.mjs "${ISSUE_IDENTIFIER}" -; then
+            echo "::warning::Optional Cadence Workpad write failed; continuing deterministic review path."
+          fi
+
+      - name: Use review-focused CLAUDE.md
+        if: steps.plan.outputs.run_claude == 'true'
+        run: cp .claude/skills/cadence-ai-review/review-CLAUDE.md CLAUDE.md
+
+      - name: Verify Cadence review configuration
+        if: steps.plan.outputs.run_claude == 'true'
+        env:
+          CADENCE_CLAUDE_MODEL: ${{ vars.CADENCE_CLAUDE_MODEL }}
+          CADENCE_HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
+        run: node .github/workflows/scripts/verify-cadence-ai-review.cjs --dry-run --require-env
+
+      - name: Run Cadence AI review
+        id: cadence_review
+        if: steps.plan.outputs.run_claude == 'true'
+        uses: anthropics/claude-code-action@30544b674398ee15c84819bd87caf8a87e8c7b55 # v1.0.154
+        with:
+          anthropic_api_key: ${{ secrets.CADENCE_AI_REVIEW_ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          # Allow only GitHub-identified bot initiators; humans retain the Action's write check.
+          allowed_bots: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.actor.type == 'Bot' && github.event.workflow_run.actor.login || steps.app-token.outputs.app-slug }}
+          prompt: |
+            /cadence-ai-review
+
+            Review PR #${{ inputs.pr_number || github.event.pull_request.number }} and post one GitHub PR review:
+            APPROVE when the PR has no blocker and no human-needed findings,
+            otherwise COMMENT.
+
+            Fast review: use one focused pass, without subagents or cross-PR fan-out.
+            This overrides the skill's exhaustive axis and coverage-matrix requirements.
+            Prioritize new human feedback, changed code, open findings and concrete
+            correctness/security risks. Reuse prior evidence for unchanged areas.
+            Keep the workpad concise; preserve source acquisition, authority checks,
+            current-head verification and the existing verdict/publication rules.
+
+            Trigger source: ${{ inputs.trigger_source || format('{0}.{1}', github.event_name, github.event.action) }}
+            Trigger actor: ${{ inputs.trigger_actor || github.actor }}
+            Current PR head SHA: ${{ steps.plan.outputs.head_sha }}
+
+            Required review skill: .claude/skills/cadence-ai-review/SKILL.md.
+            Required standing-docs review axis: scripts/symphony/runtime-bundle/review-axes/standing-docs-current-state.md.
+            Do not use .claude/skills/design-review/SKILL.md for process requirements or design review.
+
+            Read Linear and design docs as needed. Keep detailed review state in
+            the Cadence Linear Workpad. Never submit a REQUEST_CHANGES review.
+          claude_args: |
+            --model ${{ env.CADENCE_CLAUDE_MODEL }}
+            --max-turns 60
+            --allowedTools Bash,Read,Glob,Grep,Task,Write,WebFetch
+            --append-system-prompt "Post one GitHub PR review for PR #${{ inputs.pr_number || github.event.pull_request.number }} at current head ${{ steps.plan.outputs.head_sha }} using .claude/skills/cadence-ai-review/SKILL.md plus the standing-docs current-state axis when applicable. Do not use .claude/skills/design-review/SKILL.md for process requirements or design review. APPROVE when the PR has no blocker and no human-needed findings, otherwise COMMENT. Never run 'gh pr review --request-changes' and never call the reviews API with a REQUEST_CHANGES event."
+        env:
+          CLAUDE_CODE_EFFORT_LEVEL: low
+          CADENCE_CLAUDE_MODEL: ${{ vars.CADENCE_CLAUDE_MODEL }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          LINEAR_API_TOKEN: ${{ secrets.CADENCE_LINEAR_API_TOKEN }}
+
+      - name: Verify review outcomes (no false-green; block request-changes)
+        if: always() && steps.plan.outputs.run_claude == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          CADENCE_REVIEW_OUTCOME: ${{ steps.cadence_review.outcome }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const verifyCadenceAiReview = require("./.github/workflows/scripts/verify-cadence-ai-review.cjs");
+
+            await verifyCadenceAiReview({ github, context, core, reviewer: process.env.CADENCE_REVIEWER_LOGIN, reviewOutcome: process.env.CADENCE_REVIEW_OUTCOME });
+
+      - name: Fail if stale Cadence approval could not be dismissed or re-requested
+        if: always() && steps.plan.outputs.run_claude == 'true' && steps.review_state.outputs.stale_approval == 'true' && steps.stale_approvals.outputs.failed_count != '0'
+        env:
+          FAILED_COUNT: ${{ steps.stale_approvals.outputs.failed_count }}
+        run: |
+          echo "::error::${FAILED_COUNT} stale Cadence approval(s) could not be dismissed or re-requested. The check fails so stale approval state is visible."
+          exit 1
+
+  finish:
+    name: "Publish Cadence result for PR #${{ inputs.pr_number || github.event.pull_request.number }}"
+    needs: [accept, review]
+    if: always() && github.ref == 'refs/heads/main' && needs.accept.outputs.check_id != ''
+    environment: cadence-controller
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # GitHub gates draft readiness on contents:write. Limit it to this trusted
+    # repository job; the shared Cadence App has no contents-write grant.
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: cadence-check-publication-${{ github.repository }}-pr-${{ inputs.pr_number || github.event.pull_request.number }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Check out trusted helpers
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Mint existing Cadence App token
+        id: app-token
+        uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # v2.1.1
+        with:
+          app-id: ${{ vars.CADENCE_APP_ID }}
+          private-key: ${{ secrets.CADENCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: read
+          permission-checks: write
+      - name: Finish advisory check and hand clean drafts to humans
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          CHECK_REQUEST: ${{ needs.accept.outputs.request }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+          RAN_REVIEW: ${{ needs.review.outputs.ran_review }}
+          REVIEW_BASELINE: ${{ needs.review.outputs.baseline }}
+          HANDOFF_TOKEN: ${{ github.token }}
+          CADENCE_REVIEWER_LOGIN: ${{ steps.app-token.outputs.app-slug }}[bot]
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { finishCheck } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/cadence-review-check.mjs`);
+            const handoffGithub = new github.constructor({ auth: process.env.HANDOFF_TOKEN, baseUrl: process.env.GITHUB_API_URL });
+            const outcome = await finishCheck(github, JSON.parse(process.env.CHECK_REQUEST), '${{ vars.CADENCE_APP_ID }}', {
+              result: process.env.REVIEW_RESULT, ranReview: process.env.RAN_REVIEW,
+              baseline: process.env.REVIEW_BASELINE === '' ? undefined : Number(process.env.REVIEW_BASELINE),
+              reviewer: process.env.CADENCE_REVIEWER_LOGIN,
+              readyGraphql: handoffGithub.graphql,
+            });
+            if (outcome) await core.summary.addRaw(`${outcome.summary}\n`).write();
+            if (outcome?.handoffError) core.setFailed(outcome.handoffError);

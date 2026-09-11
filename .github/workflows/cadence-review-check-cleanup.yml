@@ -1,0 +1,69 @@
+name: Cadence Review Check Cleanup
+
+on:
+  workflow_run:
+    workflows:
+      [Cadence AI Review Events, Cadence AI Review Trigger, Cadence AI Review]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  cleanup:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      contains(fromJSON('["workflow_run","workflow_dispatch","pull_request_target"]'), github.event.workflow_run.event)
+    environment: cadence-controller
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Find this attempt's recovery pointers
+        id: pointers
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              ...context.repo, run_id: run.id, per_page: 100,
+            });
+            core.setOutput('found', artifacts.some(item => !item.expired && item.name.startsWith(`cadence-check-${run.run_attempt}-`)));
+      - name: Check out trusted helpers
+        if: steps.pointers.outputs.found == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Download recovery pointers as data
+        if: steps.pointers.outputs.found == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          pattern: cadence-check-${{ github.event.workflow_run.run_attempt }}-*
+          path: ${{ runner.temp }}/cadence-check-pointers
+          merge-multiple: true
+      - name: Mint existing Cadence App token
+        if: steps.pointers.outputs.found == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # v2.1.1
+        with:
+          app-id: ${{ vars.CADENCE_APP_ID }}
+          private-key: ${{ secrets.CADENCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-checks: write
+      - name: Close checks whose run ended without publication
+        if: steps.pointers.outputs.found == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { recoverCheck } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/cadence-review-check.mjs`);
+            const fs = require('node:fs');
+            const directory = `${process.env.RUNNER_TEMP}/cadence-check-pointers`;
+            for (const file of fs.readdirSync(directory)) {
+              const request = JSON.parse(fs.readFileSync(`${directory}/${file}`, 'utf8'));
+              await recoverCheck(github, context, request, '${{ vars.CADENCE_APP_ID }}', context.payload.workflow_run);
+            }

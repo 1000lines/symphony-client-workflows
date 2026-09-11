@@ -1,0 +1,63 @@
+name: Symphony Client Commands
+
+on:
+  workflow_call:
+    inputs:
+      tested-ref:
+        description: Exact target commit SHA, normally github.event.pull_request.head.sha.
+        type: string
+        required: true
+      commands:
+        description: JSON array of executable/argument arrays, in setup/build/test/lint order.
+        type: string
+        required: true
+      working-directory:
+        type: string
+        default: .
+  # Exercise this entry at its published PR head before clients consume it.
+  pull_request:
+    paths:
+      - .github/workflows/symphony-client-commands.yml
+      - .github/workflows/scripts/symphony-client-commands.test.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-commands-${{ github.repository }}-${{ inputs.tested-ref || github.event.pull_request.head.sha }}
+  cancel-in-progress: true
+
+jobs:
+  commands:
+    name: Client Commands
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact target head
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.tested-ref || github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Run target commands
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TESTED_REF: ${{ inputs.tested-ref || github.event.pull_request.head.sha }}
+          COMMANDS: ${{ inputs.commands || '[["bash","-lc","printf ''%s\\n'' ''portable command fixture'' > .client-command-result"],["bash","-lc","test \"$(cat .client-command-result)\" = ''portable command fixture''"]]' }}
+          WORKING_DIRECTORY: ${{ inputs.working-directory || '.' }}
+        with:
+          script: |
+            const { execFileSync } = require('node:child_process');
+            const { realpathSync } = require('node:fs');
+            const { resolve, relative, isAbsolute } = require('node:path');
+            const root = realpathSync(process.env.GITHUB_WORKSPACE);
+            const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+            if (!/^[a-f0-9]{40}$/.test(process.env.TESTED_REF) || head !== process.env.TESTED_REF) throw new Error('Checkout must match exact tested-ref');
+            const cwd = realpathSync(resolve(root, process.env.WORKING_DIRECTORY));
+            const path = relative(root, cwd);
+            if (path === '..' || path.startsWith('../') || isAbsolute(path)) throw new Error('Working directory must stay inside the checkout');
+            const commands = JSON.parse(process.env.COMMANDS);
+            if (!Array.isArray(commands) || !commands.length || commands.some(argv =>
+                !Array.isArray(argv) || !argv.length || argv.some(arg => typeof arg !== 'string' || !arg.trim() || arg.includes('\0')))) throw new Error('Commands must be executable/argument arrays');
+            await core.summary.addRaw(`Tested SHA: ${head}\nWorkflow: ${process.env.GITHUB_WORKFLOW_REF}\nRun: ${process.env.GITHUB_RUN_ID}, attempt: ${process.env.GITHUB_RUN_ATTEMPT}\n`).write();
+            for (const [executable, ...args] of commands) execFileSync(executable, args, { cwd, stdio: 'inherit' });
+            await core.summary.addRaw(`\nPassed ${commands.length} commands at ${head}.\n`).write();

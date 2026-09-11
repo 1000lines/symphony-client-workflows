@@ -1,0 +1,4 @@
+# Collapse per-project bookkeeping; top-level requirements, designs and plans stay visible.
+docs/symphony-plans/*/** linguist-generated
+# Keep Mermaid diagrams visible, including diagrams inside project folders.
+docs/symphony-plans/**/*.mmd -linguist-generated

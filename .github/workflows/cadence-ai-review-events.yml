@@ -1,0 +1,118 @@
+name: Cadence AI Review Events
+
+# workflow_run executes the default branch, so no second dispatch is needed.
+# The existing router verifies current feedback and its author before calling review.
+
+on:
+  workflow_run:
+    workflows: [Cadence Review Ingress]
+    types: [completed]
+
+# The reusable reviewer needs these permissions; routing narrows its own token.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  SYMPHONY_BOT_USER: ${{ vars.SYMPHONY_BOT_USER || 'example-symphony-bot' }}
+  CADENCE_REVIEWER: ${{ vars.CADENCE_REVIEWER || 'example-cadence-bot' }}
+  SYMPHONY_REPOSITORY_OWNER: ${{ vars.SYMPHONY_REPOSITORY_OWNER || github.repository_owner }}
+
+jobs:
+  route:
+    name: Route review-causing event
+    if: >-
+      github.ref == 'refs/heads/main' && github.event.workflow_run.conclusion == 'success' &&
+      fromJSON(github.event.workflow_run.display_title).eligible
+    environment: cadence-controller
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      should_request_review: ${{ steps.route.outputs.should_request_review }}
+      pr_number: ${{ steps.route.outputs.pr_number }}
+      trigger_source: ${{ steps.route.outputs.trigger_source }}
+      trigger_actor: ${{ steps.route.outputs.trigger_actor }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Read current event from GitHub
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const { resolveCadenceEvent } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/cadence-forwarded-event.mjs`);
+            const { payload, eventName } = await resolveCadenceEvent({ github, context });
+            const path = `${process.env.RUNNER_TEMP}/cadence-event.json`;
+            require('node:fs').writeFileSync(path, JSON.stringify(payload));
+            core.exportVariable('CADENCE_EVENT_PATH', path);
+            core.exportVariable('CADENCE_EVENT_NAME', eventName);
+
+      - name: Mint existing Cadence App token
+        id: app-token
+        uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # v2.1.1
+        with:
+          app-id: ${{ vars.CADENCE_APP_ID }}
+          private-key: ${{ secrets.CADENCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-metadata: read
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Classify and gate event
+        id: route
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: node .github/workflows/scripts/cadence-ai-review-route-event.mjs
+
+      - name: Acknowledge accepted feedback
+        if: >-
+          steps.route.outputs.should_request_review == 'true' &&
+          (env.CADENCE_EVENT_NAME == 'issue_comment' ||
+           env.CADENCE_EVENT_NAME == 'pull_request_review' ||
+           env.CADENCE_EVENT_NAME == 'pull_request_review_comment')
+        continue-on-error: true
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            try {
+              const payload = JSON.parse(require('node:fs').readFileSync(process.env.CADENCE_EVENT_PATH, 'utf8'));
+              const item = process.env.CADENCE_EVENT_NAME === 'pull_request_review' ? payload.review : payload.comment;
+              if (!item?.node_id) throw new Error('Accepted feedback is missing its GitHub node ID');
+              // Review bodies are Reactable nodes, distinct from inline review comments.
+              // addReaction is additive and reuses the actor's existing EYES reaction.
+              const result = await github.graphql(`mutation($subject: ID!) {
+                addReaction(input: {subjectId: $subject, content: EYES}) { reaction { id } }
+              }`, { subject: item.node_id });
+              const reaction = result.addReaction?.reaction?.id;
+              if (!reaction) throw new Error('GitHub returned no acknowledgement reaction');
+              await core.summary.addRaw(`👀 Accepted ${process.env.CADENCE_EVENT_NAME} #${item.id}; reaction ${reaction}.\n`).write();
+            } catch (error) {
+              core.warning(`Cadence acknowledgement failed; review will continue: ${error.message}`);
+              await core.summary.addRaw('⚠️ Cadence acknowledgement failed; review will continue. See the step warning.\n').write();
+            }
+
+  review:
+    needs: route
+    if: needs.route.outputs.should_request_review == 'true'
+    # Permit the callee's finish job to ready drafts with this repository token.
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    uses: ./.github/workflows/cadence-ai-review-trigger.yml
+    with:
+      pr_number: ${{ needs.route.outputs.pr_number }}
+      trigger_source: ${{ needs.route.outputs.trigger_source }}
+      trigger_actor: ${{ needs.route.outputs.trigger_actor }}
+    # Required for the callee's protected environment secrets: actions/runner#4453.
+    secrets: inherit

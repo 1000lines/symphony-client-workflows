@@ -1,0 +1,270 @@
+name: Symphony Linear Wakeups
+
+on:
+  workflow_call:
+    inputs:
+      target-repository:
+        type: string
+        required: true
+      target-default-branch:
+        type: string
+        required: true
+      event-name:
+        type: string
+        required: true
+      event-payload:
+        description: Original webhook payload serialized with toJSON(github.event).
+        type: string
+        required: true
+      helpers-repository:
+        description: Trusted workflow-source repository, fixed by the reviewed caller.
+        type: string
+        required: true
+      helpers-ref:
+        description: Reviewed workflow-source commit or publication ref; never the target PR head.
+        type: string
+        required: true
+    secrets:
+      CADENCE_LINEAR_API_TOKEN:
+        required: true
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, labeled]
+  workflow_run:
+    workflows: ["*"]
+    types: [completed]
+  # GitHub Actions checks are covered by workflow_run; these are external checks.
+  check_run:
+    types: [completed]
+  status:
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  pull-requests: read
+  statuses: read
+
+jobs:
+  wake:
+    if: >-
+      inputs.target-repository != '' ||
+      (github.event_name == 'pull_request_target' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(github.event.pull_request.labels.*.name, 'symphony')) ||
+      (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
+        contains(fromJSON('["pull_request","push","workflow_dispatch"]'), github.event.workflow_run.event)) ||
+      (github.event_name == 'check_run' &&
+        github.event.check_run.check_suite.app.slug != 'github-actions') ||
+      github.event_name == 'status'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: symphony-linear-wakeups-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
+    env:
+      LINEAR_API_TOKEN: ${{ secrets.CADENCE_LINEAR_API_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      TARGET_REPOSITORY: ${{ inputs.target-repository || github.repository }}
+      TARGET_DEFAULT_BRANCH: ${{ inputs.target-default-branch || github.event.repository.default_branch }}
+      EVENT_NAME: ${{ inputs.event-name || github.event_name }}
+      EVENT_PAYLOAD: ${{ inputs.event-payload || toJSON(github.event) }}
+      HELPER_ROOT: ${{ github.workspace }}/_symphony
+    steps:
+      - name: Check out trusted helpers
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ inputs.helpers-repository || github.repository }}
+          ref: ${{ inputs.helpers-ref || github.event.repository.default_branch }}
+          path: _symphony
+          persist-credentials: false
+
+      - name: Find the current PR and ticket
+        id: ticket
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { createGitHubClient } = await import(`${process.env.HELPER_ROOT}/.github/workflows/scripts/symphony-linear-wakeups.mjs`);
+            if (process.env.TARGET_REPOSITORY !== `${context.repo.owner}/${context.repo.repo}`) throw new Error('Target repository must be the caller.');
+            const event = JSON.parse(process.env.EVENT_PAYLOAD);
+            const eventName = process.env.EVENT_NAME;
+            if (!['pull_request_target', 'workflow_run', 'check_run', 'status'].includes(eventName)) return;
+            if (eventName === 'workflow_run' && (event.action !== 'completed' ||
+                event.workflow_run.status !== 'completed' ||
+                !['pull_request', 'push', 'workflow_dispatch'].includes(event.workflow_run.event) ||
+                event.workflow_run.head_repository?.full_name !== process.env.TARGET_REPOSITORY)) return;
+            if (eventName === 'check_run' && (event.action !== 'completed' || event.check_run.status !== 'completed')) return;
+            const client = createGitHubClient({ repo: process.env.TARGET_REPOSITORY, token: process.env.GH_TOKEN });
+            const configuration = await client.configuration(process.env.TARGET_DEFAULT_BRANCH);
+            const team = configuration.config.linear.teamKey;
+            core.setOutput('config', JSON.stringify(configuration.config));
+            const { execFileSync } = await import('node:child_process');
+            const helperSha = execFileSync('git', ['-C', process.env.HELPER_ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+            core.info(`Target configuration: ${configuration.revision}; trusted helper checkout: ${helperSha}.`);
+            const sha = event.pull_request?.head.sha || event.workflow_run?.head_sha ||
+              event.check_run?.head_sha || event.sha;
+            if (!sha) return;
+            const prs = event.pull_request ? [event.pull_request] :
+              await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit,
+                { ...context.repo, commit_sha: sha, per_page: 100 });
+            const candidates = prs.filter(pr => pr.state === 'open' &&
+              pr.head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}` &&
+              pr.labels.some(label => label.name === 'symphony'));
+            if (candidates.length !== 1) return core.info('No single open Symphony PR for this commit.');
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: candidates[0].number });
+            if (pr.state !== 'open' || pr.head.repo?.full_name !== process.env.TARGET_REPOSITORY || pr.head.sha !== sha) return core.info('Ignoring an event for an older PR head.');
+            const issue = pr.title.match(new RegExp(`^\\[?(${team}-[1-9]\\d*)\\]?(?::|\\s|$)`, 'i'))?.[1] ||
+              pr.head.ref.match(new RegExp(`\\b(${team}-[1-9]\\d*)\\b`, 'i'))?.[1];
+            if (!issue) return core.info('No ticket identifier in the PR title or branch.');
+            core.setOutput('issue', issue.toUpperCase());
+            core.setOutput('pr', pr.number);
+            core.setOutput('sha', sha);
+
+      - name: Give an active worker up to one minute to finish
+        id: ticket_state
+        if: steps.ticket.outputs.issue != ''
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          ISSUE: ${{ steps.ticket.outputs.issue }}
+        with:
+          script: |
+            const { readLinearIssue } = await import(`${process.env.HELPER_ROOT}/scripts/linear-issue-wakeup.mjs`);
+            const options = { issueIdentifier: process.env.ISSUE, token: process.env.LINEAR_API_TOKEN };
+            let issue = await readLinearIssue(options);
+            for (let attempt = 0; issue.state.name === 'Active' && attempt < 6; attempt++) {
+              await new Promise(resolve => setTimeout(resolve, 10000));
+              issue = await readLinearIssue(options);
+            }
+            const { terminalStateReason } = await import(`${process.env.HELPER_ROOT}/scripts/linear-issue-wakeup.mjs`);
+            if (terminalStateReason(issue.state) || !['Inactive', 'Unhappy'].includes(issue.state.name)) {
+              return core.info(`Leaving ${issue.identifier} in ${issue.state.name}.`);
+            }
+            core.setOutput('state', issue.state.name);
+
+      - name: Decide whether to wait, resolve a conflict, or handle CI
+        id: outcome
+        if: steps.ticket_state.outputs.state != ''
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PR_NUMBER: ${{ steps.ticket.outputs.pr }}
+          HEAD_SHA: ${{ steps.ticket.outputs.sha }}
+          ISSUE_STATE: ${{ steps.ticket_state.outputs.state }}
+          TARGET_CONFIG: ${{ steps.ticket.outputs.config }}
+          GH_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const pull_number = Number(process.env.PR_NUMBER);
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number });
+            if (pr.state !== 'open' || pr.head.sha !== process.env.HEAD_SHA) return;
+            const { createGitHubClient, requiredCi } = await import(`${process.env.HELPER_ROOT}/.github/workflows/scripts/symphony-linear-wakeups.mjs`);
+            const client = createGitHubClient({ repo: process.env.TARGET_REPOSITORY, token: process.env.GH_TOKEN });
+            const config = JSON.parse(process.env.TARGET_CONFIG);
+            const event = JSON.parse(process.env.EVENT_PAYLOAD);
+            if (process.env.EVENT_NAME === 'workflow_run' &&
+                !config.ci.requiredChecks.some(check => check.workflow === event.workflow_run.path)) {
+              return core.info('Workflow completion is outside the configured CI contract.');
+            }
+            const ci = await requiredCi({ github: client, number: pull_number,
+              headSha: pr.head.sha, requiredChecks: config.ci.requiredChecks });
+            await core.summary.addRaw('CI evidence\n\n```json\n' + JSON.stringify(ci, null, 2) + '\n```\n').write();
+            let { state, reason } = ci;
+            if (pr.mergeable === false && process.env.ISSUE_STATE === 'Inactive') {
+              state = 'Active';
+              reason = `Resolve the merge conflict in ${pr.html_url} against ${pr.base.ref}, then push the fix.`;
+              core.setOutput('conflict', 'true');
+            }
+            core.setOutput('state', state);
+            core.setOutput('reason', reason);
+
+      - name: Record conflict resolution in the Cadence workpad
+        if: steps.outcome.outputs.conflict == 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          ISSUE: ${{ steps.ticket.outputs.issue }}
+          REASON: ${{ steps.outcome.outputs.reason }}
+        with:
+          script: |
+            const { fetchIssueComments, findCadenceWorkpadComment, parseCadenceWorkpad, renderCadenceWorkpadForLinear } =
+              await import(`${process.env.HELPER_ROOT}/scripts/cadence-linear-workpad.mjs`);
+            const { linearRequest } = await import(`${process.env.HELPER_ROOT}/scripts/linear-issue-wakeup.mjs`);
+            const token = process.env.LINEAR_API_TOKEN;
+            const issue = await fetchIssueComments(process.env.ISSUE, token);
+            const comment = findCadenceWorkpadComment(issue.comments);
+            const current = comment ? parseCadenceWorkpad(comment.body) : {};
+            const { body } = renderCadenceWorkpadForLinear({ ...current, coordination: {
+              ...(typeof current.coordination === 'object' ? current.coordination : {}),
+              lastNonReviewWakeup: { reason: process.env.REASON, requestedState: 'Active' }
+            } });
+            const data = await linearRequest({ token, operation: 'record merge conflict',
+              query: comment
+                ? 'mutation($id:String!,$body:String!){commentUpdate(id:$id,input:{body:$body}){success}}'
+                : 'mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}',
+              variables: { id: comment?.id || issue.id, body } });
+            if (!(data.commentUpdate || data.commentCreate)?.success) throw new Error('Cadence workpad update failed.');
+
+      - name: Set the ticket state and wake label
+        if: steps.outcome.outputs.state != ''
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          ISSUE: ${{ steps.ticket.outputs.issue }}
+          PREVIOUS_STATE: ${{ steps.ticket_state.outputs.state }}
+          TARGET_STATE: ${{ steps.outcome.outputs.state }}
+          REASON: ${{ steps.outcome.outputs.reason }}
+          PR_NUMBER: ${{ steps.ticket.outputs.pr }}
+          HEAD_SHA: ${{ steps.ticket.outputs.sha }}
+        with:
+          script: |
+            const { linearRequest, readLinearIssue, terminalStateReason } = await import(`${process.env.HELPER_ROOT}/scripts/linear-issue-wakeup.mjs`);
+            const token = process.env.LINEAR_API_TOKEN;
+            const options = { issueIdentifier: process.env.ISSUE, token };
+            const wantsWake = process.env.TARGET_STATE === 'Unhappy';
+            const hasWakeLabel = (issue, wakeId) => {
+              if (!issue.labels || issue.labels.pageInfo.hasNextPage) throw new Error('Issue label lookup is incomplete.');
+              return issue.labels.nodes.some(label => label.id === wakeId);
+            };
+            let retryError;
+            for (let attempt = 0; attempt < 2; attempt++) {
+              const issue = await readLinearIssue(options);
+              const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(process.env.PR_NUMBER) });
+              if (terminalStateReason(issue.state) || issue.state.name !== process.env.PREVIOUS_STATE || pr.state !== 'open' || pr.head.sha !== process.env.HEAD_SHA) {
+                return core.info('Ticket or PR changed; leaving it alone.');
+              }
+              const target = issue.team.states.nodes.find(state => state.name === process.env.TARGET_STATE);
+              if (!target || terminalStateReason(target)) throw new Error(`Missing safe Linear state: ${process.env.TARGET_STATE}`);
+              const labels = await linearRequest({ token, operation: 'find wake label',
+                query: 'query($id:String!){issue(id:$id){team{labels(first:100){nodes{id name} pageInfo{hasNextPage}}}}}',
+                variables: { id: issue.id } });
+              const available = labels.issue.team.labels;
+              if (available.pageInfo.hasNextPage) throw new Error('Wake label lookup is incomplete.');
+              const wake = available.nodes.find(label => label.name === 'wake:15m');
+              if (!wake) throw new Error('Missing Linear label: wake:15m');
+              const hasWake = hasWakeLabel(issue, wake.id);
+              // Retry only when a re-read confirms the rejected delta is now unnecessary.
+              if (retryError && hasWake !== wantsWake) throw retryError;
+              const input = { stateId: target.id };
+              if (hasWake !== wantsWake) {
+                input[wantsWake ? 'addedLabelIds' : 'removedLabelIds'] = [wake.id];
+              }
+              let data;
+              try {
+                data = await linearRequest({ token, operation: 'set CI ticket state',
+                  query: 'mutation($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success issue{state{id}}}}',
+                  variables: { id: issue.id, input } });
+              } catch (error) {
+                const labelError = wantsWake ? 'Label already on issue' : 'Label not on issue';
+                if (attempt === 0 && hasWake !== wantsWake && error.message.includes(`"message":"${labelError}"`)) {
+                  retryError = error;
+                  continue;
+                }
+                throw error;
+              }
+              if (!data.issueUpdate?.success || data.issueUpdate.issue?.state.id !== target.id) throw new Error('Ticket state update failed.');
+              const updated = await readLinearIssue(options);
+              if (updated.state.id !== target.id || hasWakeLabel(updated, wake.id) !== wantsWake) {
+                throw new Error('Ticket state/wake label readback did not match; leaving the newer values alone.');
+              }
+              const evidence = `${issue.identifier}: ${issue.state.name} -> ${updated.state.name}. ${process.env.REASON} PR ${process.env.PR_NUMBER}, head ${process.env.HEAD_SHA}.`;
+              await core.summary.addRaw(evidence).write();
+              return core.info(evidence);
+            }

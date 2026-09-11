@@ -1,0 +1,107 @@
+name: Cadence AI Review
+
+# Resolve the PR set, then call the same reviewer used by the event bridge.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_numbers:
+        description: "PRs to review, comma- or space-separated (e.g. 123, 456). Optional if review_label is set."
+        required: false
+        type: string
+      review_label:
+        description: "Review every open PR carrying this label. Optional if pr_numbers is set."
+        required: false
+        type: string
+
+# The reusable reviewer needs these permissions; routing narrows its own token.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  SYMPHONY_BOT_USER: ${{ vars.SYMPHONY_BOT_USER || 'example-symphony-bot' }}
+  CADENCE_REVIEWER: ${{ vars.CADENCE_REVIEWER || 'example-cadence-bot' }}
+  SYMPHONY_REPOSITORY_OWNER: ${{ vars.SYMPHONY_REPOSITORY_OWNER || github.repository_owner }}
+
+jobs:
+  resolve:
+    if: github.ref == 'refs/heads/main'
+    name: Resolve PR list
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      pr_numbers: ${{ steps.resolve.outputs.pr_numbers }}
+      count: ${{ steps.resolve.outputs.count }}
+    steps:
+      - name: Resolve manual review inputs
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBERS: ${{ inputs.pr_numbers }}
+          REVIEW_LABEL: ${{ inputs.review_label }}
+        run: |
+          set -euo pipefail
+
+          raw_numbers="$(printf '%s' "${PR_NUMBERS}" | tr ',[:space:]' '\n' | sed '/^$/d')"
+          if [ -z "${raw_numbers}" ] && [ -z "${REVIEW_LABEL}" ]; then
+            echo "::error::Provide pr_numbers, review_label, or both."
+            exit 1
+          fi
+
+          pr_file="${RUNNER_TEMP}/cadence-manual-prs.txt"
+          : > "${pr_file}"
+
+          if [ -n "${raw_numbers}" ]; then
+            while IFS= read -r number; do
+              if ! printf '%s' "${number}" | grep -Eq '^[1-9][0-9]*$'; then
+                echo "::error::Invalid PR number: ${number}"
+                exit 1
+              fi
+              printf '%s\n' "${number}" >> "${pr_file}"
+            done <<< "${raw_numbers}"
+          fi
+
+          if [ -n "${REVIEW_LABEL}" ]; then
+            if [ -z "${GH_TOKEN}" ]; then
+              echo "::error::GITHUB_TOKEN is required when review_label is set."
+              exit 1
+            fi
+            gh pr list \
+              --state open \
+              --label "${REVIEW_LABEL}" \
+              --limit 1000 \
+              --json number \
+              --jq '.[].number' >> "${pr_file}"
+          fi
+
+          mapfile -t resolved < <(sort -n -u "${pr_file}")
+          if [ "${#resolved[@]}" -eq 0 ]; then
+            echo "::error::No open pull requests matched the supplied Cadence review inputs."
+            exit 1
+          fi
+
+          json="$(printf '%s\n' "${resolved[@]}" | jq -R . | jq -sc .)"
+          printf 'Resolved Cadence review PRs: %s\n' "$(IFS=', '; echo "${resolved[*]}")"
+          printf 'pr_numbers=%s\n' "${json}" >> "${GITHUB_OUTPUT}"
+          printf 'count=%s\n' "${#resolved[@]}" >> "${GITHUB_OUTPUT}"
+
+  review:
+    needs: resolve
+    # Permit the callee's finish job to ready drafts with this repository token.
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        pr_number: ${{ fromJson(needs.resolve.outputs.pr_numbers) }}
+    uses: ./.github/workflows/cadence-ai-review-trigger.yml
+    with:
+      pr_number: ${{ matrix.pr_number }}
+      trigger_source: workflow_dispatch.group
+    # Required for the callee's protected environment secrets: actions/runner#4453.
+    secrets: inherit

@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "symphony-repository/v1",
+  "linear": {
+    "teamKey": "100"
+  },
+  "workingDirectory": ".",
+  "instructions": [
+    "README.md",
+    ".github/workflows/AGENTS.md"
+  ],
+  "commands": {
+    "setup": [
+      [
+        "npm",
+        "ci"
+      ]
+    ],
+    "test": [
+      [
+        "npm",
+        "test"
+      ]
+    ]
+  },
+  "ci": {
+    "requiredChecks": []
+  }
+}
