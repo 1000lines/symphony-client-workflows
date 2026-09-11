@@ -51,6 +51,18 @@ const classifyHumanActor = async (login) => ({
   source: "humans-team",
 });
 
+test("label recovery preserves head coalescing and ignores unrelated labels", async () => {
+  for (const name of ["symphony", "blue", "bug"]) {
+    const routed = await routeCadenceReviewEvent({
+      eventName: "pull_request_target", actor: "example-symphony-bot", classifyActor,
+      payload: { action: "labeled", label: { name },
+        sender: { login: "example-symphony-bot" }, pull_request: pr() },
+    });
+    assert.equal(routed.shouldRequestReview, name === "symphony");
+    assert.equal(routed.coalescingKey, "pr:3592:head:abc123:context:head:head");
+  }
+});
+
 test("requests Cadence review for Symphony synchronize pushes on bot-authored symphony PRs", async () => {
   const routed = await routeCadenceReviewEvent({
     eventName: "pull_request_target",

@@ -12,7 +12,7 @@ export async function resolveCadenceEvent({ github, context }) {
   assert.equal(run.conclusion, "success");
   const { event: eventName, action, number, id, head } = JSON.parse(run.display_title);
   const actions = {
-    pull_request_target: ["opened", "ready_for_review", "synchronize"],
+    pull_request_target: ["opened", "ready_for_review", "synchronize", "labeled"],
     issue_comment: ["created", "edited"],
     pull_request_review: ["submitted", "edited"],
     pull_request_review_comment: ["created", "edited"],
@@ -25,6 +25,11 @@ export async function resolveCadenceEvent({ github, context }) {
   assert.ok(pr.number === number && pr.base?.repo?.full_name === repository && pr.state === "open" && pr.head?.sha);
   assert.ok(eventName === "issue_comment" || head === pr.head.sha, "Stale event head");
   const payload = { action, repository: run.repository, pull_request: pr, sender: run.actor };
+  if (action === "labeled") {
+    assert.ok(pr.labels?.some(label => label.name === "symphony"), "Required label no longer present");
+    // Trusted ingress admits only the symphony label. Recheck current state.
+    payload.label = { name: "symphony" };
+  }
   if (eventName !== "pull_request_target") {
     assert.ok(Number.isSafeInteger(id) && id > 0);
     const review = eventName === "pull_request_review", comment = eventName === "issue_comment";

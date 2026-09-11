@@ -39,6 +39,7 @@ const resolve = f => resolveCadenceEvent(f);
 for (const fork of [false, true]) {
   for (const [eventName, action] of [
     ["pull_request_target", "opened"], ["pull_request_target", "synchronize"], ["pull_request_target", "ready_for_review"],
+    ["pull_request_target", "labeled"],
     ["pull_request_review", "submitted"], ["pull_request_review", "edited"],
     ["issue_comment", "created"], ["issue_comment", "edited"],
     ["pull_request_review_comment", "created"], ["pull_request_review_comment", "edited"],
@@ -55,6 +56,18 @@ for (const fork of [false, true]) {
     });
   }
 }
+
+test("late symphony label reaches the review router with the original App actor", async () => {
+  const f = fixture("pull_request_target", "labeled");
+  f.run.actor = { id: 123, login: "example-symphony-bot", type: "Bot" };
+  const resolved = await resolve(f);
+  const routed = await routeCadenceReviewEvent({ ...resolved, token: "fixture-token",
+    classifyActor: async () => ({ classification: "ai", humanFacing: false }) });
+  assert.equal(routed.shouldRequestReview, true);
+  assert.equal(routed.coalescingKey, `pr:7:head:${head}:context:head:head`);
+  f.pr.labels = [];
+  await assert.rejects(resolve(f), /Required label no longer present/);
+});
 
 for (const [name, change] of [
   ["wrong repository", f => { f.run.repository.full_name = "elsewhere/repo"; }],

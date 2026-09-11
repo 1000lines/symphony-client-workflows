@@ -29,7 +29,7 @@ const REVIEW_FORCING_TRIGGER_SOURCES = new Set([
   "pull_request_review_comment.edited",
 ]);
 
-const SYMPHONY_BOT_PR_EVENT_ACTIONS = new Set(["opened", "synchronize"]);
+const SYMPHONY_BOT_PR_EVENT_ACTIONS = new Set(["opened", "synchronize", "labeled"]);
 const SYMPHONY_BOT_LABEL_RACE_TRIGGER_SOURCES = new Set([
   "pull_request_target.opened",
   "pull_request_target.synchronize",
@@ -305,6 +305,7 @@ export const routeCadenceReviewEvent = async ({
     symphonyPush =
       eventName === "pull_request_target" &&
       SYMPHONY_BOT_PR_EVENT_ACTIONS.has(payload.action) &&
+      (payload.action !== "labeled" || (payload.label?.name === "symphony" && hasLabel(prPayload.labels, "symphony"))) &&
       normalize(triggerActor) === (process.env.SYMPHONY_BOT_USER || "example-symphony-bot").trim().toLowerCase() &&
       normalize(prPayload.user?.login) === (process.env.SYMPHONY_BOT_USER || "example-symphony-bot").trim().toLowerCase();
     const isReviewRequestEvent =
@@ -320,7 +321,9 @@ export const routeCadenceReviewEvent = async ({
       headRef: prPayload.head?.ref,
     });
 
-    if (!issueIdentifier) {
+    if (eventName === "pull_request_target" && payload.action === "labeled" && payload.label?.name !== "symphony") {
+      skipReason = "unrelated-label";
+    } else if (!issueIdentifier) {
       skipReason = "missing-linked-linear-issue";
     } else if (prPayload.state && normalize(prPayload.state) !== "open") {
       skipReason = "closed-pr";

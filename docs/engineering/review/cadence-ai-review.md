@@ -8,6 +8,13 @@ the PR against its Linear acceptance criteria and linked design docs before huma
 review. Its automated scope is Symphony-managed PRs. It is separate from
 ordinary human PR review and from the general review-agent methodology.
 
+Adding `symphony` also enters the native review ingress, including when an App's
+PR-open event arrived before labeling. The forwarded-event reader rechecks the
+open PR, current head and label; the router retains the configured author/actor
+checks. Other label additions do not request review. Label recovery uses the
+existing head context and review queue, without forcing a new review over a
+current result. The CI wakeup caller already subscribes to `labeled`.
+
 The review logic lives in the `cadence-ai-review` skill
 (`.claude/skills/cadence-ai-review/`). The GitHub workflows provision
 credentials and run Claude Code against that skill. Cadence writes detailed

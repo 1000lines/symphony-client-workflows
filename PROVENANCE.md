@@ -4,6 +4,17 @@ Source: `1000lines/symphony-example@e362e5ad76fa8070ef27bf54fec9d6750195466c`.
 
 Jeremy directed publication of the existing subset on September 11, 2026, deferring prior completeness gates. Existing export files retain their paths and license; root package metadata and CI are scoped to this repository. The source repository was not modified.
 
+## PR label helper ownership — 100-69
+
+`scripts/symphony/ensure-pr-labels.mjs` and its repair regression cases are
+imported from the installed shared tooling at
+`1000lines/symphony-example@a3b7428a9e0298592e119a57923854b75a9b61a0`, retaining
+the existing metadata, association, additive-write and readback behavior. This
+package now owns its publication extension. App authentication delegates to the
+existing installed broker; its source is not duplicated. The Copier template
+distributes the same helper bytes to clients. No symphony-example files were
+patched for this change.
+
 ## Deferred planned files
 
 - `scripts/cadence-provider-result.mjs`

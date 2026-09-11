@@ -3,6 +3,7 @@ name: Cadence Review Ingress
 # current PR/feedback from GitHub before checking author authority.
 run-name: >-
   {"eligible":${{ (github.event_name != 'issue_comment' || github.event.issue.pull_request) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'symphony') &&
       !startsWith(github.event.comment.body, '<!-- cadence-review-request-receipts:v1') &&
       (contains(github.event.pull_request.labels.*.name, 'symphony') ||
        contains(github.event.issue.labels.*.name, 'symphony') ||
@@ -16,7 +17,7 @@ run-name: >-
 
 on:
   pull_request_target:
-    types: [opened, ready_for_review, synchronize]
+    types: [opened, ready_for_review, synchronize, labeled]
   issue_comment:
     types: [created, edited]
   pull_request_review:
@@ -32,6 +33,7 @@ jobs:
   ingress:
     if: >-
       (github.event_name != 'issue_comment' || github.event.issue.pull_request) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'symphony') &&
       !startsWith(github.event.comment.body, '<!-- cadence-review-request-receipts:v1') &&
       (contains(github.event.pull_request.labels.*.name, 'symphony') ||
        contains(github.event.issue.labels.*.name, 'symphony') ||
