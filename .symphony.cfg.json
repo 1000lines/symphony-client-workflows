@@ -23,6 +23,12 @@
     ]
   },
   "ci": {
-    "requiredChecks": []
+    "requiredChecks": [
+      {
+        "name": "Workflow tests",
+        "workflow": ".github/workflows/ci.yml",
+        "appId": 15368
+      }
+    ]
   }
 }
