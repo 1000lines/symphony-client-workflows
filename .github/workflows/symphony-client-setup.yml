@@ -1,0 +1,100 @@
+name: Symphony Client Setup
+
+# Generated credential probe; 100-64 owns reusable review/provider behavior.
+# Passing this workflow alone does not establish live caller or review readiness.
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  CADENCE_APP_ID: ${{ vars.CADENCE_APP_ID }}
+  CADENCE_REVIEWER: ${{ vars.CADENCE_REVIEWER }}
+  SYMPHONY_BOT_USER: ${{ vars.SYMPHONY_BOT_USER }}
+  CADENCE_CODEX_MODEL: ${{ vars.CADENCE_CODEX_MODEL }}
+  CADENCE_CLAUDE_MODEL: ${{ vars.CADENCE_CLAUDE_MODEL }}
+
+jobs:
+  repository-settings:
+    name: Check repository-visible settings
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Deliberately no environment: environment-only keys cannot satisfy callers.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Validate repository-visible settings
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          CADENCE_APP_PRIVATE_KEY: ${{ secrets.CADENCE_APP_PRIVATE_KEY }}
+          CADENCE_LINEAR_API_TOKEN: ${{ secrets.CADENCE_LINEAR_API_TOKEN }}
+          CADENCE_OPENAI_API_KEY: ${{ secrets.CADENCE_OPENAI_API_KEY }}
+          CADENCE_AI_REVIEW_ANTHROPIC_API_KEY: ${{ secrets.CADENCE_AI_REVIEW_ANTHROPIC_API_KEY }}
+        with:
+          script: |
+            if (context.ref !== `refs/heads/${context.payload.repository.default_branch}`) {
+              throw new Error('Run Cadence onboarding/review from the target default branch. Do not widen environment admission for a PR ref.');
+            }
+            const { reviewSetup, verifyEnvironment } = await import(`${process.env.GITHUB_WORKSPACE}/.agents/skills/cadence-onboarding/scripts/check-credentials.mjs`);
+            await verifyEnvironment(github, { ...context.repo, defaultBranch: context.payload.repository.default_branch });
+            const { provider } = reviewSetup(process.env);
+            core.info(`Default-branch-only environment policy verified. Repository-visible settings found; selected provider: ${provider}. Credentials not yet verified.`);
+
+  credentials:
+    name: Verify job-visible credentials
+    needs: repository-settings
+    environment: cadence-controller
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Verify App key, target installation and required grants
+        id: app-token
+        uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # v2.1.1
+        with:
+          app-id: ${{ vars.CADENCE_APP_ID }}
+          private-key: ${{ secrets.CADENCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-metadata: read
+          permission-contents: read
+          permission-actions: read
+          permission-pull-requests: write
+          permission-issues: write
+          permission-checks: write
+      - name: Verify target and publishing identity
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { verifyInstallation } = await import(`${process.env.GITHUB_WORKSPACE}/.agents/skills/cadence-onboarding/scripts/check-credentials.mjs`);
+            const { data } = await github.request('GET /installation/repositories');
+            verifyInstallation({ appSlug: process.env.APP_SLUG, reviewer: process.env.CADENCE_REVIEWER,
+              repository: `${context.repo.owner}/${context.repo.repo}` }, data);
+            core.info(`Verified Cadence App ${process.env.CADENCE_APP_ID}, installation ${process.env.INSTALLATION_ID}, target ${context.repo.owner}/${context.repo.repo}.`);
+      - name: Verify Linear and selected provider access
+        id: services
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          CADENCE_APP_PRIVATE_KEY: ${{ secrets.CADENCE_APP_PRIVATE_KEY }}
+          CADENCE_LINEAR_API_TOKEN: ${{ secrets.CADENCE_LINEAR_API_TOKEN }}
+          CADENCE_OPENAI_API_KEY: ${{ secrets.CADENCE_OPENAI_API_KEY }}
+          CADENCE_AI_REVIEW_ANTHROPIC_API_KEY: ${{ secrets.CADENCE_AI_REVIEW_ANTHROPIC_API_KEY }}
+        with:
+          script: |
+            const { verifyServices } = await import(`${process.env.GITHUB_WORKSPACE}/.agents/skills/cadence-onboarding/scripts/check-credentials.mjs`);
+            const { data } = await github.rest.repos.getContent({ ...context.repo,
+              path: '.symphony.cfg.json', ref: context.payload.repository.default_branch });
+            const config = JSON.parse(Buffer.from(data.content, 'base64').toString('utf8'));
+            const setup = await verifyServices({ ...process.env, LINEAR_TEAM_KEY: config.linear?.teamKey });
+            await core.summary.addRaw(`Credential probe passed: ${setup.provider}, model ${setup.model || "provider default (resolve in live review)"}. App grants/target and read access verified. Actual caller/callee forwarding, provider execution, review/check and Linear write/handoff remain pending until their real jobs succeed.\n`).write();
