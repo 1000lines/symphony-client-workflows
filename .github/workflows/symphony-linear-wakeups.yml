@@ -27,6 +27,10 @@ on:
     secrets:
       CADENCE_LINEAR_API_TOKEN:
         required: true
+  push:
+    branches: [main]
+  schedule:
+    - cron: "7,22,37,52 * * * *"
   pull_request_target:
     types: [opened, synchronize, reopened, edited, labeled]
   workflow_run:
@@ -56,7 +60,8 @@ jobs:
         contains(fromJSON('["pull_request","push","workflow_dispatch"]'), github.event.workflow_run.event)) ||
       (github.event_name == 'check_run' &&
         github.event.check_run.check_suite.app.slug != 'github-actions') ||
-      github.event_name == 'status'
+      github.event_name == 'status' ||
+      github.event_name == 'push' || github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     concurrency:
@@ -79,6 +84,31 @@ jobs:
           ref: ${{ inputs.helpers-ref || github.event.repository.default_branch }}
           path: _symphony
           persist-credentials: false
+
+      - name: Wake current merge conflicts
+        if: contains(fromJSON('["pull_request_target","push","schedule"]'), env.EVENT_NAME)
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { createGitHubClient, runBridge } = await import(`${process.env.HELPER_ROOT}/.github/workflows/scripts/symphony-linear-wakeups.mjs`);
+            if (process.env.TARGET_REPOSITORY !== `${context.repo.owner}/${context.repo.repo}`) throw new Error('Target repository must be the caller.');
+            const client = createGitHubClient({ repo: process.env.TARGET_REPOSITORY, token: process.env.GH_TOKEN });
+            const configuration = await client.configuration(process.env.TARGET_DEFAULT_BRANCH);
+            const { execFileSync } = await import('node:child_process');
+            const helperSha = execFileSync('git', ['-C', process.env.HELPER_ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+            core.info(`Target configuration: ${configuration.revision}; trusted helper checkout: ${helperSha}.`);
+            const results = await runBridge({
+              repo: process.env.TARGET_REPOSITORY, github: client,
+              token: process.env.GH_TOKEN, linearToken: process.env.LINEAR_API_TOKEN,
+              teamKey: configuration.config.linear.teamKey,
+              eventName: process.env.EVENT_NAME, payload: JSON.parse(process.env.EVENT_PAYLOAD),
+              triggerActor: context.actor,
+              bridgeRunUrl: `${context.serverUrl}/${process.env.TARGET_REPOSITORY}/actions/runs/${context.runId}`,
+            });
+            const evidence = JSON.stringify(results, null, 2);
+            core.info(evidence);
+            await core.summary.addRaw('<pre>' + evidence.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;') + '</pre>').write();
+            if (results.some(result => result.operation === 'failed' || result.evidenceError)) core.setFailed('Merge conflict wakeup or evidence write failed.');
 
       - name: Find the current PR and ticket
         id: ticket
@@ -157,6 +187,7 @@ jobs:
             const pull_number = Number(process.env.PR_NUMBER);
             const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number });
             if (pr.state !== 'open' || pr.head.sha !== process.env.HEAD_SHA) return;
+            if (pr.mergeable !== true) return core.info('Conflict bridge owns conflicted or unknown mergeability; scheduled recovery will recheck.');
             const { createGitHubClient, requiredCi } = await import(`${process.env.HELPER_ROOT}/.github/workflows/scripts/symphony-linear-wakeups.mjs`);
             const client = createGitHubClient({ repo: process.env.TARGET_REPOSITORY, token: process.env.GH_TOKEN });
             const config = JSON.parse(process.env.TARGET_CONFIG);
@@ -169,39 +200,8 @@ jobs:
               headSha: pr.head.sha, requiredChecks: config.ci.requiredChecks });
             await core.summary.addRaw('CI evidence\n\n```json\n' + JSON.stringify(ci, null, 2) + '\n```\n').write();
             let { state, reason } = ci;
-            if (pr.mergeable === false && process.env.ISSUE_STATE === 'Inactive') {
-              state = 'Active';
-              reason = `Resolve the merge conflict in ${pr.html_url} against ${pr.base.ref}, then push the fix.`;
-              core.setOutput('conflict', 'true');
-            }
             core.setOutput('state', state);
             core.setOutput('reason', reason);
-
-      - name: Record conflict resolution in the Cadence workpad
-        if: steps.outcome.outputs.conflict == 'true'
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-        env:
-          ISSUE: ${{ steps.ticket.outputs.issue }}
-          REASON: ${{ steps.outcome.outputs.reason }}
-        with:
-          script: |
-            const { fetchIssueComments, findCadenceWorkpadComment, parseCadenceWorkpad, renderCadenceWorkpadForLinear } =
-              await import(`${process.env.HELPER_ROOT}/scripts/cadence-linear-workpad.mjs`);
-            const { linearRequest } = await import(`${process.env.HELPER_ROOT}/scripts/linear-issue-wakeup.mjs`);
-            const token = process.env.LINEAR_API_TOKEN;
-            const issue = await fetchIssueComments(process.env.ISSUE, token);
-            const comment = findCadenceWorkpadComment(issue.comments);
-            const current = comment ? parseCadenceWorkpad(comment.body) : {};
-            const { body } = renderCadenceWorkpadForLinear({ ...current, coordination: {
-              ...(typeof current.coordination === 'object' ? current.coordination : {}),
-              lastNonReviewWakeup: { reason: process.env.REASON, requestedState: 'Active' }
-            } });
-            const data = await linearRequest({ token, operation: 'record merge conflict',
-              query: comment
-                ? 'mutation($id:String!,$body:String!){commentUpdate(id:$id,input:{body:$body}){success}}'
-                : 'mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}',
-              variables: { id: comment?.id || issue.id, body } });
-            if (!(data.commentUpdate || data.commentCreate)?.success) throw new Error('Cadence workpad update failed.');
 
       - name: Set the ticket state and wake label
         if: steps.outcome.outputs.state != ''
@@ -227,7 +227,7 @@ jobs:
             for (let attempt = 0; attempt < 2; attempt++) {
               const issue = await readLinearIssue(options);
               const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(process.env.PR_NUMBER) });
-              if (terminalStateReason(issue.state) || issue.state.name !== process.env.PREVIOUS_STATE || pr.state !== 'open' || pr.head.sha !== process.env.HEAD_SHA) {
+              if (terminalStateReason(issue.state) || issue.state.name !== process.env.PREVIOUS_STATE || pr.state !== 'open' || pr.head.sha !== process.env.HEAD_SHA || pr.mergeable !== true) {
                 return core.info('Ticket or PR changed; leaving it alone.');
               }
               const target = issue.team.states.nodes.find(state => state.name === process.env.TARGET_STATE);

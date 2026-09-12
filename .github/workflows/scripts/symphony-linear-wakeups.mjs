@@ -29,7 +29,11 @@ const hasLabel = (item, name) =>
   item.labels?.some(
     (label) => label.name?.toLowerCase() === name.toLowerCase()
   );
-const managed = (pr) => pr.state === "open" && hasLabel(pr, "symphony");
+const managed = (pr) =>
+  pr.state === "open" &&
+  !pr.merged &&
+  !pr.merged_at &&
+  hasLabel(pr, "symphony");
 const unique = (values) => [...new Set(values.filter(Boolean))];
 
 export const resolveIssue = ({
@@ -380,13 +384,20 @@ export const planWakeups = async ({
     return skip("bridge-recursion");
   const completion =
     eventName === "workflow_run" && run.event === "workflow_dispatch";
-  const conflict = ["schedule", "pull_request_target"].includes(eventName);
+  const sweep = ["schedule", "push"].includes(eventName);
+  const conflict = sweep || eventName === "pull_request_target";
+  if (
+    eventName === "push" &&
+    (payload.deleted || !payload.ref?.startsWith("refs/heads/"))
+  )
+    return skip("not-a-base-branch-push");
   if (
     ![
       "workflow_run",
       "check_run",
       "status",
       "schedule",
+      "push",
       "pull_request_target",
     ].includes(eventName)
   )
@@ -415,11 +426,10 @@ export const planWakeups = async ({
     payload.check_run?.head_sha ||
     payload.sha ||
     run?.head_sha;
-  if (eventName !== "schedule" && !eventSha)
-    throw new Error("Missing event head SHA.");
+  if (!sweep && !eventSha) throw new Error("Missing event head SHA.");
   let candidates;
   if (payload.pull_request) candidates = [payload.pull_request];
-  else if (eventName === "schedule") candidates = await github.listPrs();
+  else if (sweep) candidates = await github.listPrs();
   else if (ticketNumber)
     candidates = []; // Explicit workflow owner can differ from a code PR.
   else if (
@@ -435,14 +445,18 @@ export const planWakeups = async ({
     try {
       const pr = await github.getPr(number);
       if (managed(pr)) {
+        if (
+          eventName === "push" &&
+          `refs/heads/${pr.base?.ref}` !== payload.ref
+        )
+          continue;
         requirePr(pr, repo);
         // One malformed PR must not abort the remaining scheduled sweep.
-        if (eventName === "schedule")
-          resolveIssue({ pullRequests: [pr], teamKey });
+        if (sweep) resolveIssue({ pullRequests: [pr], teamKey });
         prs.push(pr);
       }
     } catch (error) {
-      if (eventName !== "schedule") throw error;
+      if (!sweep) throw error;
       plans.push({
         ...base,
         prNumber: number,
@@ -492,7 +506,7 @@ export const planWakeups = async ({
       ...prEvidence(pr),
       ...resolveIssue({ pullRequests: [pr], teamKey }),
     };
-    if (eventSha && pr.head.sha !== eventSha) {
+    if (!sweep && eventSha && pr.head.sha !== eventSha) {
       plans.push({
         ...evidence,
         shouldWake: false,
@@ -509,9 +523,13 @@ export const planWakeups = async ({
         skippedReason:
           pr.mergeable_state === "dirty" && pr.mergeable === false
             ? ""
+            : pr.mergeable === null
+            ? "mergeability-unknown"
             : "no-current-conflict",
         // A newer base alone must not re-wake an already handled conflict.
-        key: `conflict:${pr.number}:${pr.head.sha}`,
+        key: `conflict:${repo}:${pr.number}:${pr.head.sha}`,
+        conflictReceipt: `${repo}#${pr.number}`,
+        instruction: `Resolve the merge conflict in ${pr.html_url} against ${pr.base.ref}, then push the fix.`,
       });
     } else {
       const checks = await github.checks(pr.number, pr.head.sha);
@@ -643,6 +661,14 @@ const recordEvidence = async (result, commentId, options) => {
         .slice(-10)
         .map(slim),
       lastNonReviewWakeup: result,
+      ...(result.reason === "merge-conflict" && result.operation === "updated"
+        ? {
+            mergeConflictWakeups: {
+              ...coordination.mergeConflictWakeups,
+              [result.conflictReceipt]: slim(result),
+            },
+          }
+        : {}),
     },
   });
   if (compacted)
@@ -705,14 +731,19 @@ export const applyWakeup = async ({
       query: "query WakeupViewer { viewer { id name } }",
       operation: "verify bridge bot",
     });
-    if (!viewer?.id || viewer.name !== "Example Review Bot")
-      throw new Error("Expected Example Review Bot Linear credential owner.");
+    if (!viewer?.id || !viewer.name)
+      throw new Error("Missing Linear credential owner identity.");
     result.linearActor = { id: viewer.id, name: viewer.name };
     commentId = await pinWorkpad(plan.issueIdentifier, options);
     const current = await workpadState(result, commentId, options);
-    const previous = current.coordination?.nonReviewWakeups?.find(
-      (item) => item.key === plan.key
-    );
+    const receipt =
+      current.coordination?.mergeConflictWakeups?.[plan.conflictReceipt];
+    const previous =
+      receipt?.key === plan.key
+        ? receipt
+        : current.coordination?.nonReviewWakeups?.find(
+            (item) => item.key === plan.key
+          );
     if (
       previous &&
       (["updated", "unchanged"].includes(previous.operation) ||
@@ -798,7 +829,25 @@ export const applyWakeup = async ({
       )
         throw new Error("PR issue identity changed before wakeup.");
     }
-    Object.assign(result, await wakeLinearIssue({ ...options, issue }));
+    if (
+      plan.reason === "merge-conflict" &&
+      !terminalStateReason(issue.state) &&
+      ![
+        "Inactive",
+        "Unhappy",
+        "Evaluating",
+        "In Review",
+        "Waiting for CI",
+      ].includes(issue.state.name)
+    ) {
+      Object.assign(result, {
+        operation: "skipped",
+        state: issue.state.name,
+        skippedReason: "issue-not-waiting",
+      });
+    } else {
+      Object.assign(result, await wakeLinearIssue({ ...options, issue }));
+    }
     // A confirmed issue mutation stays confirmed even if its final evidence
     // write fails. Retry only the evidence; never reclassify or repeat the wake.
     try {
