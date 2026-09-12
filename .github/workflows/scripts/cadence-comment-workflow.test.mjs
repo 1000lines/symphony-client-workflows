@@ -97,7 +97,7 @@ function fixture(t) {
         review.minimizedReason = "duplicate";
         return {};
       }
-      return { node: { id, body: review.body, author: { login: review.user.login }, commit: { oid: review.commit_id },
+      return { node: { id, body: review.body, author: { login: "cadence", id: review.user.node_id }, commit: { oid: review.commit_id },
         isMinimized: review.isMinimized || false, minimizedReason: review.minimizedReason || null } };
     },
     constructor: class {
@@ -188,7 +188,7 @@ test("real YAML publishes one comment through queued, reviewing, completion, dup
     node_id: "PRR_1",
     state: "COMMENTED",
     commit_id: head,
-    user: { login: "cadence[bot]", type: "Bot" },
+    user: { login: "cadence[bot]", type: "Bot", node_id: "BOT_cadence" },
     body: "- Fix retry handling.",
     html_url: "https://github.com/owner/repo/pull/3#pullrequestreview-1",
   });
@@ -322,7 +322,7 @@ test("subsequent reviews copy and hide each original while keeping one comment a
     await f.run(queued, {}, req);
     const { baseline } = await f.run(started, {}, req);
     f.reviews.push({ id: index, node_id: `PRR_${index}`, state, commit_id: head,
-      user: { login: "cadence[bot]", type: "Bot" }, body: `Assessment ${index}: original body`,
+      user: { login: "cadence[bot]", type: "Bot", node_id: "BOT_cadence" }, body: `Assessment ${index}: original body`,
       html_url: `https://github.com/owner/repo/pull/3#pullrequestreview-${index}` });
     await f.run(finished, { REVIEW_BASELINE: String(baseline) }, req);
     assert.equal(f.reviews[index - 1].body, `Assessment ${index}: original body`);
