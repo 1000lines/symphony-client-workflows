@@ -279,7 +279,7 @@ function hideFixture() {
     node_id: "PRR_7",
     body: "Assessment: Blocked\n\n- Fix retry handling.",
     commit_id: head,
-    user: { login: "cadence[bot]", type: "Bot" },
+    user: { login: "cadence[bot]", type: "Bot", node_id: "BOT_cadence" },
     html_url: "https://github.com/owner/repo/pull/3#pullrequestreview-7",
   };
   Object.assign(f.check, {
@@ -290,7 +290,8 @@ function hideFixture() {
   const node = {
     id: review.node_id,
     body: review.body,
-    author: { login: "cadence[bot]" },
+    // GitHub GraphQL omits REST's [bot] login suffix; the node ID is stable.
+    author: { login: "cadence", id: "BOT_cadence" },
     commit: { oid: head },
     isMinimized: false,
     minimizedReason: null,
@@ -338,6 +339,25 @@ for (const state of ["APPROVED", "COMMENTED"]) {
     assert.equal(f.mutations.length, 1);
   });
 }
+
+test("missing or different author node IDs never authorize hiding", async () => {
+  for (const scenario of [
+    "different",
+    "missing-rest",
+    "missing-graphql",
+    "missing-both",
+  ]) {
+    const f = hideFixture();
+    if (scenario === "different") f.node.author.id = "BOT_other";
+    if (scenario === "missing-rest" || scenario === "missing-both")
+      delete f.review.user.node_id;
+    if (scenario === "missing-graphql" || scenario === "missing-both")
+      delete f.node.author.id;
+    await assert.rejects(f.run(), /review changed/);
+    assert.equal(f.mutations.length, 0, scenario);
+    assert.equal(f.node.isMinimized, false, scenario);
+  }
+});
 
 test("copy failure or failed copy readback never hides the source review", async () => {
   for (const failure of ["write", "readback"]) {
