@@ -156,7 +156,7 @@ test("workflow boundaries keep PR ingress secret-free and every privileged job o
     assert.match(job.if, /fromJSON\(github.event.workflow_run.display_title\).eligible/);
     assert.equal(job.environment, "cadence-controller");
     assert.equal(job.steps[0].with.repository, "1000lines/symphony-client-workflows");
-    assert.equal(job.steps[0].with.ref, "${{ inputs.helpers-ref || 'alpha' }}");
+    assert.equal(job.steps[0].with.ref, "${{ inputs.helpers-ref || 'main' }}");
     assert.equal(job.steps[0].with["persist-credentials"], false);
     assert.match(job.steps[1].uses, /^actions\/github-script@/);
     assert.match(job.steps[1].with.script, /cadence-forwarded-event.mjs/);

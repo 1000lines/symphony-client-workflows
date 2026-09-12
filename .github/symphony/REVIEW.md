@@ -45,7 +45,7 @@ The author and reviewer remain distinct; human acceptance owns merge and Done.
 
 ## Current Cadence status
 
-The pinned shared status-comment revision lets Cadence edit one App-owned
+The shared status-comment workflow on `main` lets Cadence edit one App-owned
 PR comment as reviews queue, run, complete or fail. It shows the current verdict,
 a brief assessment and up to three findings, with links to the head, run and
 formal review. Detailed history remains in reviews, runs and the Linear workpad.

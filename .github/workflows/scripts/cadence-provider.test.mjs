@@ -134,7 +134,7 @@ test('every reusable boundary declares and forwards only named secrets; ingress 
       for (const step of job.steps || []) {
         if (step.uses?.startsWith('actions/checkout@')) {
           assert.equal(step.with.repository, '1000lines/symphony-client-workflows');
-          assert.equal(step.with.ref, "${{ inputs.helpers-ref || 'alpha' }}");
+          assert.equal(step.with.ref, "${{ inputs.helpers-ref || 'main' }}");
           assert.equal(step.with['persist-credentials'], false);
         }
       }

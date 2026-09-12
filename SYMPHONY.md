@@ -29,8 +29,8 @@ pending or missing uses Unhappy with `wake:15m`; failures return nonterminal
 tickets to Active; passing checks return them to Inactive for review. Preserve
 terminal states and current-head guards. Live mode/bridge proof remains CT-A.
 
-Review event/manual, handoff and cleanup callers share a reviewed workflow/helper
-revision and explicit named secrets. Ingress is secret-free. Follow review context
+Review event/manual, handoff and cleanup callers use shared workflows and helpers
+from `main` with explicit named secrets. Ingress is secret-free. Follow review context
 for provider selection; report live execution separately from generated files.
 
 Run the [PR guidance](docs/engineering/symphony/pull-requests.md) fetch/render
@@ -44,7 +44,7 @@ branch without needing a new head. Recovery at minutes 7, 22, 37 and 52 UTC also
 checks other bases and retries unknown mergeability. GitHub may delay schedules
 or disable them after inactivity; recovery has no guaranteed 15-minute deadline.
 
-Publish the accepted bridge to `symphony-client-workflows@alpha`, install the
+Publish the accepted bridge to `symphony-client-workflows@main`, install the
 caller on the default branch, and enable Actions/schedules. Map only
 `CADENCE_LINEAR_API_TOKEN`: its owner needs issue/team/project reads, Cadence
 workpad writes and team issue-state updates. Record the authenticated owner;

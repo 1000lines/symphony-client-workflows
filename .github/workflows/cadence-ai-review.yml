@@ -18,7 +18,7 @@ on:
         description: "Reviewed symphony-client-workflows revision providing the trusted review helpers."
         type: string
         required: false
-        default: alpha
+        default: main
       pr_numbers:
         type: string
         required: false
@@ -124,7 +124,7 @@ jobs:
         pr_number: ${{ fromJson(needs.resolve.outputs.pr_numbers) }}
     uses: ./.github/workflows/cadence-ai-review-trigger.yml
     with:
-      helpers-ref: ${{ inputs.helpers-ref || 'alpha' }}
+      helpers-ref: ${{ inputs.helpers-ref || 'main' }}
       pr_number: ${{ matrix.pr_number }}
       trigger_source: workflow_dispatch.group
     secrets:
