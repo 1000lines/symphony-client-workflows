@@ -1,11 +1,62 @@
 # Register and install the Apps
 
-Use Node 20+ and an ordinary operator `gh` login for github.com. Run this after
-Copier in the target checkout. Cadence reviews; Symphony authors. Keep their App
-IDs and bot logins different. Public MVP forks reuse the accepted existing Apps.
+Use an ordinary operator `gh` login for github.com after Copier in the target
+checkout. Register Apps in the browser, or use the optional local
+`setup-app.mjs` helper with Node 20+. Copier and the `gh` setup/probe commands do
+not require Node; the workflows run their own tools on GitHub Actions runners.
+Cadence reviews; Symphony authors. Keep their App IDs and bot logins different.
+Public MVP forks reuse the accepted existing Apps.
 The hosted worker's installation token cannot register Apps or administer secrets.
 
-## Cadence first
+## Cadence App essentials
+
+The App supplies Cadence's GitHub identity and installation access tokens;
+GitHub Actions runs the review code. No separately hosted App service is needed.
+Required repository permissions match `cadence-app-manifest.json`:
+
+- **Read-only:** Metadata (implicit), Contents, Actions.
+- **Read & write:** Pull requests, Issues, Checks.
+- **No access:** other repository, organization and account permissions.
+
+Keep the App ID, its PEM private key and actual `slug[bot]` login, and install it
+on every repository it will review. The Client ID, OAuth client secrets and
+user-authorization callback/setup URLs are unused. Leave OAuth/device flow off,
+webhooks inactive and event subscriptions empty; native Actions deliver events.
+The optional manifest helper's one-time registration redirect is separate from
+OAuth and does not need a running callback server. The
+[permission table](#permission-rationale) explains each grant and the different
+Symphony author permissions.
+
+## Browser setup without local Node
+
+1. In the owning personal account or organization, open **Settings → Developer
+   settings → GitHub Apps → New GitHub App**. Choose a unique App name and use
+   the target repository's URL as the Homepage URL.
+2. Set the Cadence repository permissions above. Deselect **Active** under
+   Webhook and leave the optional OAuth, callback and setup fields unused.
+   Choose **Only on this account** when all targets belong to the App owner;
+   choose **Any account** if it must be installable under other owners.
+3. Create the App. Record its numeric **App ID** and actual slug; use
+   `SLUG[bot]` for `CADENCE_REVIEWER`. Under **Private keys**, generate a PEM
+   private key and keep the downloaded file outside the checkout in a protected
+   location. Reuse an existing App/key when available.
+4. Open **Install App**, select the target owner and repository or repositories,
+   and accept the grants. Registration alone does not install the App or grant
+   repository access. The App ID differs from both Client ID and installation ID.
+5. Provision Actions settings through the
+   [onboarding guide](../../.agents/skills/cadence-onboarding/SKILL.md), for example
+   `gh secret set CADENCE_APP_PRIVATE_KEY --repo OWNER/REPO < /secure/cadence.pem`.
+   Obtain the Linear and provider keys separately. Run the guide's default-branch
+   `Symphony Client Setup` workflow and inspect both jobs for effective grants
+   and credential readiness, then verify a live review and Linear handoff.
+
+For a missing Symphony author App, repeat with a different name and the Symphony
+column of the permission table. Send its PEM to the host operator's secure
+provisioning process; its signing key stays outside Actions and Copier.
+
+See GitHub's [registration instructions](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app).
+
+## Cadence with the optional helper
 
 Review `cadence-app-manifest.json` and the permission table below. Prepare a local
 browser form with the owner, repositories, role and name (substitute your values):

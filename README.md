@@ -37,7 +37,7 @@ See the [review configuration](docs/engineering/review/cadence-ai-review.md#requ
 ## Development
 
 This repository also has a Copier-managed client installation from
-`symphony-client-template` main at `d74c5d8e3a24766fb96a259cf718efc2e27228e6`.
+`symphony-client-template` main at `84c83698fe2e66e066d307ac674727274e61acb2`.
 Its recorded answers, client instructions, skills, App setup and PR tooling are
 installed at the root. Existing package commands and `Workflow tests` remain
 the CI contract; there is no separate build step.

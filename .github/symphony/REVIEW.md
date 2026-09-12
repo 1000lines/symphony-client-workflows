@@ -47,7 +47,7 @@ The author and reviewer remain distinct; human acceptance owns merge and Done.
 
 The shared status-comment workflow on `main` lets Cadence edit one App-owned
 PR comment as reviews queue, run, complete or fail. It shows the current verdict,
-a brief assessment and up to three findings, with links to the head, run and
+the complete assessment and findings, with links to the head, run and
 formal review. Detailed history remains in reviews, runs and the Linear workpad.
 
 The footer uses observed model/token usage when the provider exposes it and
@@ -61,3 +61,14 @@ is needed. Keep the generated caller and helper revision matched. When adopting 
 and verify one
 live App-authored comment is edited across reviews. Generated-file validation does not establish live deployment; the root client
 may still use its separately recorded older template source.
+
+After the full assessment is copied and read back, the shared publisher hides
+that verified Cadence App-owned formal review with GitHub **Hide → Duplicate**.
+It preserves the original body, verdict, ID, evidence and existing check/Linear
+handoff. Human/other reviews and the consolidated comment remain visible.
+
+A failed copy never hides the original. A failed hide retries through the
+existing completion/recovery path without replacing the comment or footer. The
+actual Cadence App token must demonstrate `isMinimized=true` and
+`minimizedReason=duplicate`; interactive operator hiding and local fixtures do
+not prove that permission. No credential fallback or new App grant is allowed.
