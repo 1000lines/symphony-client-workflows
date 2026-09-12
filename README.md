@@ -74,6 +74,11 @@ npm test
 
 [Publication provenance](PROVENANCE.md) · [Review guide](docs/engineering/review/cadence-ai-review.md)
 
+For isolated live workflow tests, use the
+[dedicated repository setup and fixture guide](docs/engineering/symphony/workflow-test-repository.md).
+It installs the production client through Copier and keeps disposable Linear
+fixtures behind a dispatch hold until their observations and cleanup finish.
+
 ## Merge conflict wakeups
 
 The reusable `symphony-linear-wakeups.yml` accepts the generated caller's

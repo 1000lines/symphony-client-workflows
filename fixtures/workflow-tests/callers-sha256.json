@@ -1,0 +1,17 @@
+{
+  "templateSha": "7c99f9e26179b24ba9e451e778c8c48ad622679f",
+  "preparedRepository": "1000lines/test-repo-1",
+  "preparedClientCommit": "6474445d4f928934a4a9ecaccff76d55e60707f5",
+  "installed": false,
+  "sha256": {
+    "cadence-ai-review-events.yml": "958a49e6bc0e66c8353c07f03678a915ce7421b40b67b18cad3a7cbfd891330d",
+    "cadence-ai-review-trigger.yml": "4e679079d8b71b128535cbac0c57c3ea9c8733a136eb54c08e7f1fb5df436578",
+    "cadence-ai-review.yml": "44a3661180556a6833e85629fdbc7ee5ef5a9609bba11a8cd53e8a87e0c2ae5f",
+    "cadence-linear-rework.yml": "6584bb206279787653da0a6bd444569cc441faf75ff6e9d029e3faa1af433fe8",
+    "cadence-review-check-cleanup.yml": "3430f5ba05114da1ee21f1ede6d18379a04087ab8dee379917b5fa78b6157914",
+    "cadence-review-ingress.yml": "d7bfbb0b152895fd6f53cfd54b010bc4854a44f4d6904d46617e58bd0a5b747e",
+    "symphony-client-ci.yml": "78b28e30ffe863015bf4638f91c4ecc1bc07ffdca774786c32609d3b6d46141e",
+    "symphony-client-setup.yml": "cd9ccc92a2e4327d16bf5d9b0d2fac6498f0e49755872f0d84e1176dee4d2855",
+    "symphony-client-wakeups.yml": "3dd4bb0d1c0a48bde778c1c63d47220650541ad79fdb6386f60f7032c14143af"
+  }
+}
