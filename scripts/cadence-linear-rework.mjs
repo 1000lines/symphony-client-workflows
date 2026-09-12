@@ -163,6 +163,10 @@ export const classifyCadenceLinearReworkEvent = ({
   }
 
   if (normalize(reviewer) === normalize(cadenceReviewerLogin)) {
+    // 100-60: review 5182521833 reached handoff run 34637211981, but this
+    // human-needed branch retained shouldMove=false and only requested review.
+    // Structured routing awaits 100-76's correlated persisted result on main;
+    // 100-78 owns the Copier-installed review-to-Linear proof after adoption.
     if (hasHumanInputNeededContent(reviewBody)) {
       return {
         ...base,
