@@ -58,3 +58,21 @@ repository layout and product language are defined by that repository.
   mandatory enough in the workpad to drive Linear rework. Label optional or
   nice-to-have follow-up as non-blocking.
 - Do not edit application code or expose secrets or local paths.
+
+## Structured publication dependency
+
+The instructions above describe the current reviewer-owned publication path.
+The [structured result contract](../../../docs/engineering/review/reviewer-result.md)
+is available, but assessment isolation and trusted publication are pending
+[100-76](https://linear.app/1000lines/issue/100-76). Integration requires the existing
+[100-64 provider interfaces](https://github.com/1000lines/symphony-client-workflows/pull/2)
+accepted on `main`; a Linear Done state alone does not satisfy that prerequisite.
+Resume integration after that merge without importing the provider draft commits.
+
+The accepted replacement gives assessment read-only context/tools and its provider
+credential. Trusted code validates and persists the correlated result through the
+existing workpad before publication, then binds the App-authored review ID to the
+head, request, run/attempt, provider and feedback watermark. Missing records require
+a fresh review, never prose interpretation. Release this path with the compatible
+[100-60 consumer](https://linear.app/1000lines/issue/100-60) through the
+[100-78 publication checkpoint](https://linear.app/1000lines/issue/100-78).
