@@ -368,6 +368,21 @@ callers. Ingress needs no provider or App secrets. Handoff needs App/Linear;
 cleanup needs only App. GITHUB_TOKEN is supplied by Actions; no legacy bot PAT is
 required.
 
+### Planned settings and timing extension
+
+[100-44](https://linear.app/1000lines/issue/100-44) waits for
+[100-77](https://github.com/1000lines/symphony-client-workflows/pull/7) to hand off
+the completed trigger, check and compact footer on `main` before implementation.
+Its other prerequisite, [100-73](https://github.com/1000lines/symphony-client-template/pull/14),
+supplies recorded-source render validation for template changes.
+The extension will preserve fast defaults and key-driven selection while exposing
+optional model/effort settings, requested/effective values, and observed queue
+(accepted request to provider start) and execution (provider start to finish) times.
+Unsupported settings and unavailable measurements must be explicit.
+These controls and timings are pending; the configuration above remains current.
+[100-78](https://linear.app/1000lines/issue/100-78) and Jeremy own real setting
+changes and both-provider proof after publication and Copier adoption.
+
 ## Identities
 
 - **Review App**: the configured Cadence App authors reviews with a short-lived,
