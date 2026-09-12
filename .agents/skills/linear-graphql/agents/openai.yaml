@@ -1,0 +1,4 @@
+interface:
+  display_name: "Linear GraphQL"
+  short_description: "Verified Linear queries and authorized mutations"
+  default_prompt: "Use $linear-graphql: prefer the injected tool; in human sessions only, use the shipped authenticated script when absent. Verify viewer/workspace/team and preserve factory preflight, preview, staging, readback and retry guards."

@@ -1,0 +1,17 @@
+{
+  "name": "1000lines-symphony",
+  "url": "https://github.com/1000lines/symphony-client-workflows",
+  "description": "Symphony author operations for this repository",
+  "public": false,
+  "default_events": [],
+  "default_permissions": {
+    "metadata": "read",
+    "contents": "write",
+    "actions": "read",
+    "pull_requests": "write",
+    "issues": "write",
+    "checks": "read",
+    "statuses": "read",
+    "workflows": "write"
+  }
+}

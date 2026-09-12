@@ -36,6 +36,31 @@ See the [review configuration](docs/engineering/review/cadence-ai-review.md#requ
 
 ## Development
 
+This repository also has a Copier-managed client installation from
+`symphony-client-template` main at `d74c5d8e3a24766fb96a259cf718efc2e27228e6`.
+Its recorded answers, client instructions, skills, App setup and PR tooling are
+installed at the root. Existing package commands and `Workflow tests` remain
+the CI contract; there is no separate build step.
+
+This provider repo uses its existing native ingress, review/handoff/cleanup and
+Linear wakeup implementations for its own events. Their generated caller paths
+are excluded from Copier so adoption does not overwrite reusable source or add
+duplicate listeners. The generated setup workflow is installed. The provider's
+review guide above describes its runtime; generated client review guidance is
+the template baseline, not a replacement for those native implementations.
+
+From a clean checkout with Copier 9.18.2 installed, preserve these exclusions:
+
+```sh
+bash scripts/symphony/update-client.sh main
+```
+
+An immutable template commit can replace `main`. `COPIER` may name the executable
+in a virtual environment. Do not run bare `copier update` here: its exclusions
+are not persisted in the answers file. The separate client/provider ingress
+rename remains tracked by 100-65; this installation keeps the existing ingress
+authoritative and does not rename or broaden trusted workflow identities.
+
 ```sh
 npm ci
 npm test
