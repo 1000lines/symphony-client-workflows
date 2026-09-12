@@ -2,8 +2,10 @@
 
 [R1 / node V](https://github.com/1000lines/symphony-client-template/blob/e7a9be382c062f141727c9a9129aef384aea8efb/docs/symphony-plans/template-enhancements-design.md#r1--structured-reviewer-deterministic-coordinator)
 defines the provider boundary. The [pure adapter](../../../.github/workflows/scripts/cadence-review-result.mjs)
-validates data without network access, provider calls or publication. P supplies
-trusted acquisition and persistence; N consumes the same persisted output.
+validates data without network access, provider calls or publication. The publisher
+([100-76](https://linear.app/1000lines/issue/100-76)) supplies trusted acquisition and
+persistence; the handoff consumer ([100-60](https://linear.app/1000lines/issue/100-60))
+consumes the same persisted output.
 
 ## Provider input to the adapter
 
@@ -55,7 +57,7 @@ The second argument is coordinator-owned `trusted`, never merged from model data
   head/base, configuration/controller refs and complete accepted-feedback watermark.
 - `workpad`: parsed existing workpad plus acquired `commentId` and `issueId`.
   Its persisted `reviewContract` must match the live generation and include the
-  existing ledger. P queues/persists that generation using the existing helper.
+  existing ledger. The publisher queues/persists it using the existing helper.
 - `inputsComplete: true`, `providerSucceeded: true`: explicit acquisition and
   execution results. False/missing values reject every verdict.
 - `requirements`: complete `{id, source}` inventory with trusted source URLs,
@@ -71,10 +73,11 @@ The second argument is coordinator-owned `trusted`, never merged from model data
   settings; acquisition verifies App identity and trusted refs, not the model.
   Optional `timings` reserves `requestAcceptedAt`, `providerStartedAt`,
   `providerFinishedAt`: each is an observed timestamp or explicit `null` for
-  unavailable. Present observations must be chronological. T owns measurement
-  and presentation; the adapter neither estimates times nor routes from them.
+  unavailable. Present observations must be chronological. The review-settings task
+  ([100-44](https://linear.app/1000lines/issue/100-44)) owns measurement and presentation;
+  the adapter neither estimates times nor routes from them.
 
-P/N must acquire complete pages, verify human authority, bind request IDs to the
+Callers must acquire complete pages, verify human authority, bind request IDs to the
 invocation and re-read current head/base/feedback before action. This pure module
 cannot prove that caller-supplied context came from those APIs. A changed head,
 base, accepted-feedback watermark or request rejects the old result, even when
@@ -84,10 +87,15 @@ the summary says approved. Model-owned routing/provenance fields are rejected.
 
 ```js
 const incomingWorkpad = adaptReviewerResult(providerJson, trusted);
-// P persists through the existing helper with liveGeneration, then reads back.
-// N supplies freshly acquired trusted context for the persisted generation:
+// The publisher persists with liveGeneration through the existing helper, then reads back.
+// The consumer reacquires target/feedback context for the persisted generation:
 const output = readReviewerResult(trustedWithPersistedWorkpad);
 ```
+
+The consumer supplies `trusted.provenance` verbatim from the authenticated persisted
+publisher output, including its run/attempt, App identity, settings, refs and timings.
+It reacquires current head/base/feedback/request context; substituting the consumer's
+own run attribution fails the stored-output digest check.
 
 `validateReviewerResult(providerJson, trusted)` returns the same validated
 `cadence-review/v1` output without completing the generation. `adaptReviewerResult`
@@ -110,12 +118,13 @@ entries. Missing structured output produces an error and a fresh-review handoff,
 never reinterpretation of a legacy review's prose. Valid old history remains
 readable; an old prose-only approval is not a structured result.
 
-P owns durable write/readback before successful check/review publication, binding
+The publisher owns durable write/readback before successful check/review publication, binding
 the App-authored review ID to head/request/run/attempt, failure recording and
-retry. N verifies that publication binding and App/review authority before any
+retry. The consumer verifies that publication binding and App/review authority before any
 transition. The adapter's return is neither a persistence receipt nor permission
 to publish. Markers carry correlation only. Preserve concurrency, deduplication
-and loop caps in their current owners; release P/N compatibly together in B.
+and loop caps in their current owners. The live review proof task
+([100-78](https://linear.app/1000lines/issue/100-78)) owns compatible publisher/consumer release.
 
 ## Validation
 
