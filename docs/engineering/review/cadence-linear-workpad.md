@@ -21,8 +21,10 @@ and bridge coordination intact when updating the snapshot.
 
 Cadence review and the retained standalone non-review bridge share this
 workpad using the configured Linear credential. The standalone bridge reserves
-`coordination.nonReviewWakeups` for ten recent deduplication records and
-`coordination.lastNonReviewWakeup` for the latest event's full evidence.
+`coordination.nonReviewWakeups` for ten recent deduplication records,
+`coordination.lastNonReviewWakeup` for the latest event's full evidence, and
+`coordination.mergeConflictWakeups` for durable conflict receipts per
+repository/PR head, independent of the recent event history.
 Full snapshot and incremental review writes preserve these fields. Terminal
 skips are deduplicated along with confirmed wakeups. Bridge error strings are
 bounded; the workflow run summary also records the mutation result and any
@@ -34,13 +36,17 @@ independent Cadence writers still have no atomic update guarantee.
 
 Payloads with `reviewUpdate` merge into the stored review history. Payloads
 without it replace the review snapshot: omitted review fields are cleared, while
-the two reserved bridge fields are preserved. Cadence's planning workflows send
+the reserved bridge fields are preserved. Cadence's planning workflows send
 replacement snapshots. The bridge's own evidence writes retain the complete
 review snapshot they read. Callers that need stored review fields must use
 `reviewUpdate` or supply a complete snapshot.
 
-The current CI YAML writes conflict instructions and records state results in
-its run log; it does not use the standalone bridge's deduplication ledger.
+The wakeup workflow routes PR, base-push and scheduled conflict checks through
+the standalone bridge. Confirmed conflicts record the resolution instruction,
+actual state result and receipt in this workpad and the workflow summary.
+CI defers conflicted PRs to that bridge; unknown mergeability puts waiting
+issues in `Unhappy` with `wake:15m` so the timer rechecks the PR and CI even
+without another GitHub event.
 The review handoff bridge records `coordination.reviewHandoff`; the event router
 records trigger context and coalescing evidence. Review and non-review bridges use the shared
 [wakeup helper](../../../scripts/linear-issue-wakeup.mjs): `Active` first,

@@ -881,11 +881,11 @@ test("workpad creation and update failures block state changes", async () => {
   }
 });
 
-test("bot identity and missing token fail closed", async () => {
+test("missing credential identity and missing token fail closed", async () => {
   const [eventPlan] = await plan();
   for (const token of [undefined, "fixture"]) {
     const fixture = linearFixture({
-      viewer: { id: "human", name: "Example Lead" },
+      viewer: {},
     });
     const result = await applyWakeup({
       plan: eventPlan,
@@ -1353,6 +1353,8 @@ async function runWorkflowFixture(
     eventName = "pull_request_target",
     currentState = "Inactive",
     conflict = false,
+    mergeability = !conflict,
+    changedMergeability,
     ci = null,
     changedState = "",
     changedHead = false,
@@ -1392,7 +1394,7 @@ async function runWorkflowFixture(
     head: { ...pr().head, ref: prBranch },
     mergeable: conflict,
   });
-  currentPr.mergeable = !conflict;
+  currentPr.mergeable = mergeability;
   const states = ["Active", "Inactive", "Unhappy", "Done", "Backlog"].map(
     (name) => ({ id: name, name })
   );
@@ -1689,6 +1691,8 @@ async function runWorkflowFixture(
     });
   if (changedState) live.state = changedState;
   if (changedHead) currentPr.head.sha = "new-head";
+  if (changedMergeability !== undefined)
+    currentPr.mergeable = changedMergeability;
   for (
     let attempt = 0;
     outcome.state && attempt < (duplicate ? 2 : 1);
@@ -1702,6 +1706,37 @@ async function runWorkflowFixture(
   }
   return { writes, waits, outputs, infos, snapshots, issue: issue() };
 }
+
+for (const phase of ["outcome", "mutation"]) {
+  test(`YAML workflow: unknown mergeability at ${phase} schedules CI recovery`, async (t) => {
+    const { writes, issue, infos } = await runWorkflowFixture(t, {
+      eventName: "workflow_run",
+      currentState: "Inactive",
+      ci: "success",
+      ...(phase === "outcome"
+        ? { mergeability: null }
+        : { changedMergeability: null }),
+    });
+    assert.deepEqual(writes.find((write) => write.kind === "state")?.input, {
+      stateId: "Unhappy",
+      addedLabelIds: ["wake"],
+    });
+    assert.equal(issue.state.name, "Unhappy");
+    assert.match(infos.join("\n"), /[Mm]ergeability.*unknown.*timer/);
+  });
+}
+
+test("YAML workflow: conflict discovered before CI mutation remains owned by conflict bridge", async (t) => {
+  const { writes } = await runWorkflowFixture(t, {
+    eventName: "workflow_run",
+    ci: "success",
+    changedMergeability: false,
+  });
+  assert.equal(
+    writes.some((write) => write.kind === "state"),
+    false
+  );
+});
 
 for (const [name, options, expected] of [
   ["pending CI sleeps", {}, "Unhappy"],
@@ -1763,19 +1798,9 @@ for (const [name, options, expected] of [
   });
 }
 
-test("YAML workflow: conflict instruction preserves the Cadence workpad before activation", async (t) => {
+test("YAML CI path leaves conflicts to the deduplicated bridge", async (t) => {
   const { writes } = await runWorkflowFixture(t, { conflict: true });
-  assert.deepEqual(
-    writes.map((write) => write.kind),
-    ["workpad", "state"]
-  );
-  const workpad = parseCadenceWorkpad(writes[0].body);
-  assert.equal(workpad.status, "reviewing");
-  assert.match(
-    workpad.coordination.lastNonReviewWakeup.reason,
-    /Resolve the merge conflict/
-  );
-  assert.equal(writes[1].input.stateId, "Active");
+  assert.deepEqual(writes, []);
 });
 
 test("workflow boundary supports native and reusable CI without reviewer secrets", () => {
@@ -1783,7 +1808,8 @@ test("workflow boundary supports native and reusable CI without reviewer secrets
     workflows: ["*"],
     types: ["completed"],
   });
-  assert.equal(wakeWorkflow.on.schedule, undefined);
+  assert.deepEqual(wakeWorkflow.on.schedule, [{ cron: "7,22,37,52 * * * *" }]);
+  assert.deepEqual(wakeWorkflow.on.push, { branches: ["main"] });
   assert.deepEqual(Object.keys(wakeWorkflow.on.workflow_call.secrets), [
     "CADENCE_LINEAR_API_TOKEN",
   ]);
@@ -2014,4 +2040,267 @@ test("YAML label update: incomplete membership fails before mutation", async (t)
     /incomplete/
   );
   assert.equal(audit.writes.length, 0);
+});
+
+test("base push wakes the unchanged PR head, unknown mergeability recovers, and receipts survive history churn", async (t) => {
+  const fixture = linearFixture({
+    viewer: { id: "adopter-bot", name: "Adopter Review Bot" },
+  });
+  let current = pr({ mergeable: true, mergeable_state: "clean" });
+  const options = {
+    repo,
+    github: github({ getPr: async () => current }),
+    linearToken: "fixture",
+    fetchImpl: fixture.fetchImpl,
+    bridgeRunUrl: runUrl,
+  };
+  const push = () =>
+    runBridge({
+      ...options,
+      eventName: "push",
+      payload: {
+        ref: "refs/heads/main",
+        after: current.base.sha,
+        sender: { login: "maintainer" },
+      },
+    });
+  assert.equal((await push())[0].shouldWake, false);
+  const newerBase = "c".repeat(40);
+  current = pr({
+    base: { ...pr().base, sha: newerBase },
+    mergeable: null,
+    mergeable_state: "unknown",
+  });
+  assert.equal((await push())[0].skippedReason, "mergeability-unknown");
+  assert.equal(
+    fixture.calls.length,
+    0,
+    "unknown mergeability must not consume a receipt"
+  );
+  current = { ...current, mergeable: false, mergeable_state: "dirty" };
+  const [recovered] = await runBridge({
+    ...options,
+    eventName: "schedule",
+    payload: {},
+  });
+  assert.equal(recovered.operation, "updated");
+  assert.equal(recovered.headSha, head);
+  assert.equal(recovered.baseSha, newerBase);
+  assert.equal(recovered.identitySource, "pr-title");
+  assert.equal(recovered.linearActor.name, "Adopter Review Bot");
+  assert.equal(recovered.previousState, "Inactive");
+  assert.equal(recovered.state, "Active");
+  assert.match(recovered.instruction, /Resolve the merge conflict/);
+  assert.equal(
+    parseCadenceWorkpad(fixture.comment.body).coordination.lastNonReviewWakeup
+      .mutation.success,
+    true
+  );
+  t.diagnostic(
+    `MOCK API FIXTURE base-advance recovery: ${JSON.stringify(recovered)}`
+  );
+
+  // Other bridge events may rotate the ten-entry history without allowing a loop.
+  const saved = parseCadenceWorkpad(fixture.comment.body);
+  saved.coordination.nonReviewWakeups = [];
+  fixture.comment.body = renderCadenceWorkpadForLinear(saved).body;
+  fixture.issue.state = inactive;
+  current = { ...current, base: { ...current.base, sha: "d".repeat(40) } };
+  assert.equal((await push())[0].skippedReason, "duplicate-event");
+  assert.equal(mutations(fixture).length, 1);
+
+  // A new PR head can need conflict resolution again.
+  current = { ...current, head: { ...current.head, sha: "e".repeat(40) } };
+  assert.equal((await push())[0].operation, "updated");
+  assert.equal(mutations(fixture).length, 2);
+});
+
+test("base push selects only its open managed PRs and does not compare the base SHA to the head", async () => {
+  const prs = [
+    pr(),
+    pr({ number: 43, base: { ...pr().base, ref: "release" } }),
+    pr({ number: 44, state: "closed" }),
+    pr({ number: 45, merged: true }),
+    pr({ number: 46, labels: [] }),
+    pr({ number: 47, mergeable: true, mergeable_state: "clean" }),
+  ];
+  const fixture = linearFixture();
+  const results = await runBridge({
+    repo,
+    eventName: "push",
+    payload: { ref: "refs/heads/main", after: base },
+    github: github({
+      listPrs: async () => prs,
+      getPr: async (number) => prs.find((p) => p.number === number),
+    }),
+    linearToken: "fixture",
+    fetchImpl: fixture.fetchImpl,
+  });
+  assert.deepEqual(
+    results
+      .filter((result) => result.operation === "updated")
+      .map((result) => result.prNumber),
+    [42]
+  );
+  assert.equal(mutations(fixture).length, 1);
+  for (const payload of [
+    { ref: "refs/tags/v1" },
+    { ref: "refs/heads/main", deleted: true },
+  ]) {
+    const [skip] = await plan({ eventName: "push", payload, github: {} });
+    assert.equal(skip.skippedReason, "not-a-base-branch-push");
+  }
+});
+
+test("active work remains eligible for recovery after the worker parks", async () => {
+  const fixture = linearFixture({ issue: { state: active } });
+  const options = {
+    repo,
+    eventName: "schedule",
+    payload: {},
+    github: github(),
+    linearToken: "fixture",
+    fetchImpl: fixture.fetchImpl,
+  };
+  const [busy] = await runBridge(options);
+  assert.equal(busy.skippedReason, "issue-not-waiting");
+  assert.equal(mutations(fixture).length, 0);
+  fixture.issue.state = inactive;
+  assert.equal((await runBridge(options))[0].operation, "updated");
+});
+
+for (const change of [
+  { state: "closed" },
+  { merged: true },
+  { mergeable: null, mergeable_state: "unknown" },
+  { mergeable: true, mergeable_state: "clean" },
+  { base: { ...pr().base, sha: "new-base" } },
+  { title: "[100-999]: retargeted issue" },
+  { labels: [] },
+]) {
+  test(`conflict mutation rechecks current PR: ${JSON.stringify(
+    change
+  )}`, async () => {
+    const fixture = linearFixture();
+    const [eventPlan] = await plan({ eventName: "schedule", payload: {} });
+    const result = await applyWakeup({
+      repo,
+      plan: eventPlan,
+      github: github({ getPr: async () => pr(change) }),
+      token: "fixture",
+      fetchImpl: fixture.fetchImpl,
+    });
+    assert.notEqual(result.operation, "updated");
+    assert.equal(mutations(fixture).length, 0);
+  });
+}
+
+for (const state of ["Done", "Canceled", "Cancelled", "Duplicate", "Backlog"]) {
+  test(`conflict does not reactivate ${state}`, async () => {
+    const fixture = linearFixture({
+      issue: { state: { id: state, name: state } },
+    });
+    const [result] = await runBridge({
+      repo,
+      eventName: "schedule",
+      payload: {},
+      github: github(),
+      linearToken: "fixture",
+      fetchImpl: fixture.fetchImpl,
+    });
+    assert.equal(result.operation, "skipped");
+    assert.equal(mutations(fixture).length, 0);
+  });
+}
+
+test("actual YAML conflict step forwards a base push through trusted config and records the bridge result", async (t) => {
+  const originalEnv = { ...process.env };
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    for (const key of Object.keys(process.env))
+      if (!(key in originalEnv)) delete process.env[key];
+    Object.assign(process.env, originalEnv);
+  });
+  const fixture = linearFixture();
+  const current = pr({ base: { ...pr().base, sha: "c".repeat(40) } });
+  const root = `https://api.github.com/repos/${repo}`;
+  const config = {
+    schemaVersion: "symphony-repository/v1",
+    linear: { teamKey: "100" },
+    workingDirectory: ".",
+    instructions: [],
+    commands: {},
+    ci: { requiredChecks: [] },
+  };
+  globalThis.fetch = async (url, options) => {
+    if (url === "https://api.linear.app/graphql")
+      return fixture.fetchImpl(url, options);
+    const routes = {
+      [root]: {
+        id: 1,
+        full_name: repo,
+        owner: { login: "example-org" },
+        default_branch: "main",
+      },
+      [`${root}/branches/main`]: { name: "main", commit: { sha: base } },
+      [`${root}/git/trees/${base}`]: {
+        tree: [
+          {
+            path: ".symphony.cfg.json",
+            mode: "100644",
+            type: "blob",
+            sha: head,
+          },
+        ],
+        truncated: false,
+      },
+      [`${root}/git/blobs/${head}`]: {
+        sha: head,
+        encoding: "base64",
+        content: Buffer.from(JSON.stringify(config)).toString("base64"),
+      },
+      [`${root}/pulls?state=open&per_page=100&page=1`]: [current],
+      [`${root}/pulls/42`]: current,
+    };
+    assert.ok(url in routes, `Unexpected request: ${url}`);
+    return { ok: true, status: 200, json: async () => routes[url] };
+  };
+  Object.assign(process.env, {
+    HELPER_ROOT: new URL("../../../", import.meta.url).pathname,
+    TARGET_REPOSITORY: repo,
+    TARGET_DEFAULT_BRANCH: "main",
+    GH_TOKEN: "fixture-github",
+    LINEAR_API_TOKEN: "fixture",
+    EVENT_NAME: "push",
+    EVENT_PAYLOAD: JSON.stringify({
+      ref: "refs/heads/main",
+      after: current.base.sha,
+      sender: { login: "maintainer" },
+    }),
+  });
+  const summaries = [];
+  const step = wakeWorkflow.jobs.wake.steps.find(
+    (step) => step.name === "Wake current merge conflicts"
+  );
+  await new AsyncFunction("context", "core", step.with.script)(
+    {
+      repo: { owner: "example-org", repo: "example-repo" },
+      serverUrl: "https://github.com",
+      runId: 123,
+    },
+    {
+      info: () => {},
+      setFailed: assert.fail,
+      summary: {
+        addRaw: (text) => ({ write: async () => summaries.push(text) }),
+      },
+    }
+  );
+  assert.equal(fixture.issue.state.name, "Active");
+  assert.equal(mutations(fixture).length, 1);
+  assert.match(summaries[0], /merge-conflict/);
+  assert.match(summaries[0], /maintainer/);
+  assert.match(summaries[0], /pr-title/);
+  assert.match(summaries[0], /"operation": "updated"/);
 });

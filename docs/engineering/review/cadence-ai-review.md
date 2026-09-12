@@ -288,19 +288,24 @@ scope, or organization scope selected for the client. No values belong in Copier
 answers or committed files. Forward named secrets explicitly at every reusable
 hop; environment-only secrets cannot be forwarded from a caller job.
 
-| Actions secret | Consumer / mapping |
-| --- | --- |
-| `CADENCE_APP_PRIVATE_KEY` | Required Cadence App token minting in routing, review/check publication, handoff and cleanup |
-| `CADENCE_OPENAI_API_KEY` | `openai/codex-action` input `openai-api-key` (the provider's OpenAI API key, often named `OPENAI_API_KEY` outside Actions) |
-| `CADENCE_AI_REVIEW_ANTHROPIC_API_KEY` | `anthropics/claude-code-action` input `anthropic_api_key` |
-| `CADENCE_LINEAR_API_TOKEN` | Issue acquisition and Cadence workpad; required by the handoff/wakeup callers, optional for the review's workpad write |
+When migrating from environment-only credentials, provision the same named secrets
+at repository scope (or organization scope selected for the client), then remove
+the environment copies to prevent shadowing. Retain the environment's default-branch
+admission policy.
 
-| Keys reaching the review job | Result |
-| --- | --- |
-| OpenAI only | Codex |
-| Anthropic only | Claude |
-| Both | Codex |
-| Neither | Clear configuration error before checkout, App token minting or review work |
+| Actions secret                        | Consumer / mapping                                                                                                         |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `CADENCE_APP_PRIVATE_KEY`             | Required Cadence App token minting in routing, review/check publication, handoff and cleanup                               |
+| `CADENCE_OPENAI_API_KEY`              | `openai/codex-action` input `openai-api-key` (the provider's OpenAI API key, often named `OPENAI_API_KEY` outside Actions) |
+| `CADENCE_AI_REVIEW_ANTHROPIC_API_KEY` | `anthropics/claude-code-action` input `anthropic_api_key`                                                                  |
+| `CADENCE_LINEAR_API_TOKEN`            | Issue acquisition and Cadence workpad; required by the handoff/wakeup callers, optional for the review's workpad write     |
+
+| Keys reaching the review job | Result                                                                      |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| OpenAI only                  | Codex                                                                       |
+| Anthropic only               | Claude                                                                      |
+| Both                         | Codex                                                                       |
+| Neither                      | Clear configuration error before checkout, App token minting or review work |
 
 Provider declarations are individually optional at `workflow_call`; the either/or
 requirement is checked at runtime. No dummy Anthropic key is needed. Authentication
@@ -333,13 +338,6 @@ ref. The client template supplies event, direct/manual, group, handoff and clean
 callers. Ingress needs no provider or App secrets. Handoff needs App/Linear;
 cleanup needs only App. GITHUB_TOKEN is supplied by Actions; no legacy bot PAT is
 required.
-
-After accepting the shared workflow and template PRs, publish their reviewed
-revisions and run Copier update for adopters. Guided credential provisioning and
-live readiness verification belong to [100-62](https://linear.app/1000lines/issue/100-62).
-Tests of provider selection and forwarding are separate from a real provider
-review, App check and Linear handoff; record each live workflow run before
-claiming readiness.
 
 ## Identities
 

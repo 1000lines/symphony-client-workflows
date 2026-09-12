@@ -561,6 +561,7 @@ test("resolveWorkpadInput merges an incremental update from existing markdown", 
 test("review and event-gate writes preserve the latest bridge-owned ledger", () => {
   const bridgeState = {
     nonReviewWakeups: [{ key: "check:42:head:99", operation: "updated" }],
+    mergeConflictWakeups: { "repo:42:head": { operation: "updated" } },
     lastNonReviewWakeup: {
       key: "check:42:head:99",
       mutation: { success: true },
@@ -573,7 +574,11 @@ test("review and event-gate writes preserve the latest bridge-owned ledger", () 
   for (const incomingWorkpad of [
     {
       status: "review-requested",
-      coordination: { trigger: "review", nonReviewWakeups: [] },
+      coordination: {
+        trigger: "review",
+        nonReviewWakeups: [],
+        mergeConflictWakeups: {},
+      },
     },
     { reviewUpdate: { sha: "new-head", coordination: { trigger: "review" } } },
     { coordination: "Review complete" },
@@ -586,6 +591,10 @@ test("review and event-gate writes preserve the latest bridge-owned ledger", () 
     assert.deepEqual(
       resolved.coordination.lastNonReviewWakeup,
       bridgeState.lastNonReviewWakeup
+    );
+    assert.deepEqual(
+      resolved.coordination.mergeConflictWakeups,
+      bridgeState.mergeConflictWakeups
     );
     assert.equal(resolved.coordination.oldReviewField, undefined);
     if (typeof incomingWorkpad.coordination === "string")
@@ -607,6 +616,7 @@ test("lossless layout keeps all review state when the duplicate display exceeds 
 test("full snapshots recover malformed canonical JSON without losing readable bridge state", () => {
   const bridgeState = {
     nonReviewWakeups: [{ key: "key", operation: "updated" }],
+    mergeConflictWakeups: { "repo:42:head": { operation: "updated" } },
   };
   const body = renderCadenceWorkpad({ coordination: bridgeState }).replace(
     /("schemaVersion": "cadence-workpad\/v1alpha1")/,
@@ -623,6 +633,10 @@ test("full snapshots recover malformed canonical JSON without losing readable br
     bridgeState.nonReviewWakeups
   );
   assert.match(resolved.other[0], /Replaced malformed review JSON/);
+  assert.deepEqual(
+    resolved.coordination.mergeConflictWakeups,
+    bridgeState.mergeConflictWakeups
+  );
   assert.throws(
     () =>
       resolveWorkpadInput({
@@ -639,6 +653,26 @@ test("full snapshots recover malformed canonical JSON without losing readable br
       ),
       incomingWorkpad: { status: "completed" },
     })
+  );
+});
+
+test("malformed canonical JSON with conflict receipts requires readable coordination", () => {
+  const body = renderCadenceWorkpad({
+    coordination: {
+      mergeConflictWakeups: { "repo:42:head": { operation: "updated" } },
+    },
+  })
+    .replace(/("schemaVersion": "cadence-workpad\/v1alpha1")/, "$1, BROKEN JSON")
+    .replace(
+      /(### AI-to-AI Coordination\n)[\s\S]*?(?=\n### )/,
+      "$1\nDisplay unavailable.\n"
+    );
+  assert.throws(
+    () => resolveWorkpadInput({
+      existingBody: body,
+      incomingWorkpad: { status: "completed" },
+    }),
+    /not valid JSON/
   );
 });
 
@@ -662,6 +696,7 @@ test("minimal review compaction retains bridge dedup and last evidence", () => {
   const bridgeState = {
     nonReviewWakeups: [{ key: "workflow:123:1", operation: "updated" }],
     lastNonReviewWakeup: { key: "workflow:123:1", mutation: { success: true } },
+    mergeConflictWakeups: { "repo:42:head": { operation: "updated" } },
   };
   const { body, compacted } = renderCadenceWorkpadForLinear({
     ...structuredWorkpad,
@@ -680,6 +715,10 @@ test("minimal review compaction retains bridge dedup and last evidence", () => {
   assert.deepEqual(
     saved.coordination.lastNonReviewWakeup,
     bridgeState.lastNonReviewWakeup
+  );
+  assert.deepEqual(
+    saved.coordination.mergeConflictWakeups,
+    bridgeState.mergeConflictWakeups
   );
 });
 
