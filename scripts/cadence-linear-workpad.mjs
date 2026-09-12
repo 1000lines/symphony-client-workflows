@@ -448,7 +448,7 @@ export const compactCadenceWorkpadForCommentLimit = (workpad = {}) => {
 
 const nonReviewCoordination = (coordination) =>
   Object.fromEntries(
-    ["nonReviewWakeups", "lastNonReviewWakeup"]
+    ["nonReviewWakeups", "lastNonReviewWakeup", "mergeConflictWakeups"]
       .filter((key) => coordination?.[key] !== undefined)
       .map((key) => [key, coordination[key]])
   );
@@ -799,7 +799,10 @@ export const resolveWorkpadInput = ({
       if (reviewUpdate || !isCadenceWorkpadBody(existingBody)) throw error;
       const section = parseSection(existingBody, "AI-to-AI Coordination");
       const json = section?.match(/^```json\s*\n([\s\S]*?)\n```$/)?.[1];
-      if (!json && /nonReviewWakeups|lastNonReviewWakeup/.test(existingBody))
+      if (
+        !json &&
+        /nonReviewWakeups|lastNonReviewWakeup|mergeConflictWakeups/.test(existingBody)
+      )
         throw error;
       existingWorkpad = { coordination: json ? JSON.parse(json) : {} };
       recoveryNote =
@@ -822,7 +825,7 @@ export const resolveWorkpadInput = ({
     resolved = preserveReviewContract(existingWorkpad, resolved, liveGeneration);
   }
   // Event-gate payloads replace review fields wholesale. The non-review bridge
-  // owns these two fields; preserve the latest stored values even when a
+  // owns these fields; preserve the latest stored values even when a
   // reviewer supplies an older snapshot or a string coordination summary.
   const bridgeState = nonReviewCoordination(existingWorkpad.coordination);
   if (!Object.keys(bridgeState).length) return resolved;
