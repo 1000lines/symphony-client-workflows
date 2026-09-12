@@ -7,7 +7,7 @@ The reusable entry points are:
 
 - `.github/workflows/symphony-client-commands.yml` — run client build/test commands.
 - `.github/workflows/symphony-linear-wakeups.yml` — forward CI state and merge conflicts to Linear.
-- `.github/workflows/cadence-ai-review-trigger.yml` — review one PR.
+- `.github/workflows/cadence-ai-review-trigger.yml` — review one PR and reconcile Linear when a PR closes.
 - `.github/workflows/cadence-ai-review-events.yml` — route verified ingress feedback to review.
 - `.github/workflows/cadence-ai-review.yml` — manually select a PR group.
 - `.github/workflows/cadence-linear-rework.yml` — route reviews to Linear or humans.
@@ -35,6 +35,12 @@ Handoff needs App/Linear secrets, cleanup only the App key, and ingress none.
 See the [review configuration](docs/engineering/review/cadence-ai-review.md#required-configuration).
 
 ## Development
+
+The existing close event also runs the deterministic
+[Linear PR-close handler](docs/engineering/symphony/pr-close-reconciliation.md).
+It checks every associated PR before choosing Done or Canceled; unavailable or
+ambiguous data leaves the ticket alone. The guide covers native Linear automation,
+permissions, race limits, and default-branch rollout.
 
 This repository also has a Copier-managed client installation from
 `symphony-client-template` main at `84c83698fe2e66e066d307ac674727274e61acb2`.
