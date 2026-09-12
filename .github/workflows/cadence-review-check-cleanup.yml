@@ -10,7 +10,7 @@ on:
         description: "Reviewed symphony-client-workflows revision providing the trusted review helpers."
         type: string
         required: false
-        default: alpha
+        default: main
   workflow_run:
     workflows:
       [Cadence AI Review Events, Cadence AI Review Trigger, Cadence AI Review]
@@ -64,7 +64,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: 1000lines/symphony-client-workflows
-          ref: ${{ inputs.helpers-ref || 'alpha' }}
+          ref: ${{ inputs.helpers-ref || 'main' }}
           persist-credentials: false
       - name: Download recovery pointers as data
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

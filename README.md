@@ -1,7 +1,7 @@
 # Symphony client workflows
 
-Shared GitHub workflows and helpers for Symphony clients, published on the moving
-`alpha` branch. Development uses `main`.
+Shared GitHub workflows and helpers for Symphony clients, consumed directly from
+`main`. Merged changes are available to clients on their next workflow run.
 
 The reusable entry points are:
 
@@ -13,9 +13,9 @@ The reusable entry points are:
 - `.github/workflows/cadence-linear-rework.yml` — route reviews to Linear or humans.
 - `.github/workflows/cadence-review-check-cleanup.yml` — recover unfinished checks.
 
-Use `1000lines/symphony-client-workflows/.github/workflows/<file>@alpha` or a
-reviewed commit. For Cadence, pass the same revision as `helpers-ref`; helpers
-always come from this shared repository, while GitHub API reads and publication
+Use `1000lines/symphony-client-workflows/.github/workflows/<file>@main` and
+`helpers-ref: main`; helpers always come from this shared repository, while
+GitHub API reads and publication
 target the caller. Keep `cadence-controller` restricted to the client's default
 branch. Ingress is a secret-free native workflow rendered by the client template.
 
@@ -85,7 +85,7 @@ Linear issue/team/project read access, Cadence workpad writes and issue state
 updates. Its actual owner is recorded, without a synthetic display-name gate.
 `GITHUB_TOKEN` reads PRs and trusted default-branch config; the reusable workflow
 retains its Actions/checks/contents/PR/status read permissions. Keep
-`helpers-repository` and `helpers-ref` fixed to reviewed shared code, never the
+`helpers-repository` fixed to this shared repository and `helpers-ref: main`, never the
 PR head. No target PR code executes with this credential.
 
 The bridge rechecks open/unmerged status, same-repository ownership, head/base,
@@ -98,7 +98,7 @@ as the base advances. A new head is eligible again. Linear writes are not atomic
 with GitHub reads; failed final evidence writes are surfaced and retried once.
 Keep the workflow's repository concurrency group when adopting it.
 
-Publish accepted shared code to `alpha` before activating the updated generated
+Merge shared code to `main` before activating the updated generated
 caller on a client's default branch. Enable Actions and scheduled workflows;
 GitHub may delay schedules and disables them after public-repository inactivity.
 A deployed base-push/recovery run plus the matching Cadence workpad's confirmed

@@ -16,7 +16,7 @@ on:
     inputs:
       helpers-ref:
         type: string
-        default: alpha
+        default: main
       pr_number:
         type: string
         required: true
@@ -70,7 +70,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: 1000lines/symphony-client-workflows
-          ref: ${{ inputs.helpers-ref || 'alpha' }}
+          ref: ${{ inputs.helpers-ref || 'main' }}
           persist-credentials: false
       - name: Mint existing Cadence App token
         id: app-token
@@ -121,7 +121,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: 1000lines/symphony-client-workflows
-          ref: ${{ inputs.helpers-ref || 'alpha' }}
+          ref: ${{ inputs.helpers-ref || 'main' }}
           persist-credentials: false
 
       - name: Mint existing Cadence App token

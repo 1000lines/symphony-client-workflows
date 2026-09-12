@@ -362,7 +362,7 @@ and network access for GitHub/Linear source acquisition and publication. Sudo is
 dropped before execution. Both Actions receive the same review prompt and the
 same short-lived App/Linear credentials. They read target source through GitHub;
 the checkout contains trusted shared review helpers, not PR-controlled code.
-Pass a reviewed shared revision as `helpers-ref`, matching the reusable workflow
+Use `helpers-ref: main`, matching the reusable workflow
 ref. The client template supplies event, direct/manual, group, handoff and cleanup
 callers. Ingress needs no provider or App secrets. Handoff needs App/Linear;
 cleanup needs only App. GITHUB_TOKEN is supplied by Actions; no legacy bot PAT is
@@ -631,7 +631,7 @@ flow; an already completed comment does not suppress the hide retry. Subsequent
 reviews update the same comment. Current-head and newer-request guards still
 apply. The native finish/recovery logs include the verified hide result.
 
-Adoption requires matched shared workflow/helper refs via Copier. Retain a live
+Adoption uses shared workflow/helper refs at `main` via Copier. Retain a live
 Cadence App run showing the original review ID/body/verdict, stable comment ID
 and hide readback. Interactive operator hiding does not prove the workflow App
 can minimize reviews. Do not switch credentials or expand permissions on failure.

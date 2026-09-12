@@ -37,7 +37,7 @@ on:
         description: "Reviewed symphony-client-workflows revision providing the trusted review helpers."
         type: string
         required: false
-        default: alpha
+        default: main
       pr_number:
         required: true
         type: string
@@ -140,7 +140,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: 1000lines/symphony-client-workflows
-          ref: ${{ inputs.helpers-ref || 'alpha' }}
+          ref: ${{ inputs.helpers-ref || 'main' }}
           persist-credentials: false
 
       - name: Mint existing Cadence App token
@@ -224,7 +224,7 @@ jobs:
       queue: single # Hold the review slot across start and assessment, not the publication lock.
     uses: ./.github/workflows/cadence-ai-review-run.yml
     with:
-      helpers-ref: ${{ inputs.helpers-ref || 'alpha' }}
+      helpers-ref: ${{ inputs.helpers-ref || 'main' }}
       pr_number: ${{ inputs.pr_number || format('{0}', github.event.pull_request.number) }}
       trigger_source: ${{ inputs.trigger_source || format('{0}.{1}', github.event_name, github.event.action) }}
       trigger_actor: ${{ inputs.trigger_actor || github.actor }}
@@ -257,7 +257,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: 1000lines/symphony-client-workflows
-          ref: ${{ inputs.helpers-ref || 'alpha' }}
+          ref: ${{ inputs.helpers-ref || 'main' }}
           persist-credentials: false
       - name: Mint existing Cadence App token
         id: app-token
