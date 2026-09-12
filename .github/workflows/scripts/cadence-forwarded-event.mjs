@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 export async function resolveCadenceEvent({ github, context }) {
   const run = context.payload.workflow_run;
   const repository = `${context.repo.owner}/${context.repo.repo}`;
-  assert.equal(context.ref, "refs/heads/main");
+  assert.equal(context.ref, `refs/heads/${context.payload.repository?.default_branch || "main"}`);
   assert.equal(run.repository.full_name, repository);
   assert.equal(run.path, ".github/workflows/cadence-review-ingress.yml");
   assert.equal(run.status, "completed");

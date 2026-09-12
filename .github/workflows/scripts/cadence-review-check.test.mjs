@@ -389,8 +389,8 @@ test("workflow puts recoverable admission before review queue and serializes onl
       ],
       "write"
     );
-  assert.match(accept.if, /github.ref == 'refs\/heads\/main'/);
-  assert.match(finish.if, /github.ref == 'refs\/heads\/main'/);
+  assert.match(accept.if, /github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\)/);
+  assert.match(finish.if, /github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\)/);
   assert.deepEqual(finish.permissions, {
     contents: "write",
     "pull-requests": "write",

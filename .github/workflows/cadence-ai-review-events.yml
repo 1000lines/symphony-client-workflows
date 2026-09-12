@@ -4,6 +4,22 @@ name: Cadence AI Review Events
 # The existing router verifies current feedback and its author before calling review.
 
 on:
+  workflow_call:
+    secrets:
+      CADENCE_APP_PRIVATE_KEY:
+        required: true
+      CADENCE_OPENAI_API_KEY:
+        required: false
+      CADENCE_AI_REVIEW_ANTHROPIC_API_KEY:
+        required: false
+      CADENCE_LINEAR_API_TOKEN:
+        required: false
+    inputs:
+      helpers-ref:
+        description: "Reviewed symphony-client-workflows revision providing the trusted review helpers."
+        type: string
+        required: false
+        default: alpha
   workflow_run:
     workflows: [Cadence Review Ingress]
     types: [completed]
@@ -15,6 +31,7 @@ permissions:
   pull-requests: write
 
 env:
+  GH_REPO: ${{ github.repository }}
   SYMPHONY_BOT_USER: ${{ vars.SYMPHONY_BOT_USER || 'example-symphony-bot' }}
   CADENCE_REVIEWER: ${{ vars.CADENCE_REVIEWER || 'example-cadence-bot' }}
   SYMPHONY_REPOSITORY_OWNER: ${{ vars.SYMPHONY_REPOSITORY_OWNER || github.repository_owner }}
@@ -23,7 +40,7 @@ jobs:
   route:
     name: Route review-causing event
     if: >-
-      github.ref == 'refs/heads/main' && github.event.workflow_run.conclusion == 'success' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.event.workflow_run.conclusion == 'success' &&
       fromJSON(github.event.workflow_run.display_title).eligible
     environment: cadence-controller
     runs-on: ubuntu-latest
@@ -41,7 +58,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: main
+          repository: 1000lines/symphony-client-workflows
+          ref: ${{ inputs.helpers-ref || 'alpha' }}
           persist-credentials: false
 
       - name: Read current event from GitHub
@@ -111,8 +129,12 @@ jobs:
       pull-requests: write
     uses: ./.github/workflows/cadence-ai-review-trigger.yml
     with:
+      helpers-ref: ${{ inputs.helpers-ref || 'alpha' }}
       pr_number: ${{ needs.route.outputs.pr_number }}
       trigger_source: ${{ needs.route.outputs.trigger_source }}
       trigger_actor: ${{ needs.route.outputs.trigger_actor }}
-    # Required for the callee's protected environment secrets: actions/runner#4453.
-    secrets: inherit
+    secrets:
+      CADENCE_APP_PRIVATE_KEY: ${{ secrets.CADENCE_APP_PRIVATE_KEY }}
+      CADENCE_OPENAI_API_KEY: ${{ secrets.CADENCE_OPENAI_API_KEY }}
+      CADENCE_AI_REVIEW_ANTHROPIC_API_KEY: ${{ secrets.CADENCE_AI_REVIEW_ANTHROPIC_API_KEY }}
+      CADENCE_LINEAR_API_TOKEN: ${{ secrets.CADENCE_LINEAR_API_TOKEN }}

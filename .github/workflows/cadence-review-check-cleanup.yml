@@ -1,6 +1,16 @@
 name: Cadence Review Check Cleanup
 
 on:
+  workflow_call:
+    secrets:
+      CADENCE_APP_PRIVATE_KEY:
+        required: true
+    inputs:
+      helpers-ref:
+        description: "Reviewed symphony-client-workflows revision providing the trusted review helpers."
+        type: string
+        required: false
+        default: alpha
   workflow_run:
     workflows:
       [Cadence AI Review Events, Cadence AI Review Trigger, Cadence AI Review]
@@ -13,7 +23,7 @@ permissions:
 jobs:
   cleanup:
     if: >-
-      github.ref == 'refs/heads/main' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       contains(fromJSON('["workflow_run","workflow_dispatch","pull_request_target"]'), github.event.workflow_run.event)
     environment: cadence-controller
     runs-on: ubuntu-latest
@@ -33,7 +43,8 @@ jobs:
         if: steps.pointers.outputs.found == 'true'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: main
+          repository: 1000lines/symphony-client-workflows
+          ref: ${{ inputs.helpers-ref || 'alpha' }}
           persist-credentials: false
       - name: Download recovery pointers as data
         if: steps.pointers.outputs.found == 'true'

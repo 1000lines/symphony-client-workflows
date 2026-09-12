@@ -229,7 +229,7 @@ test("trusted event calls allow their verified trigger actor without changing pu
   const review = steps.find((step) => step.id === "cadence_review");
   assert.equal(review.uses, "anthropics/claude-code-action@30544b674398ee15c84819bd87caf8a87e8c7b55");
 
-  assert.match(triggerWorkflow.jobs.review.if, /github.ref == 'refs\/heads\/main'/);
+  assert.match(triggerWorkflow.jobs.review.if, /github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\)/);
   assert.equal(review.with.github_token, '${{ steps.app-token.outputs.token }}');
   assert.equal(review.with.allowed_non_write_users, undefined);
   assert.equal(review["continue-on-error"], undefined);
@@ -240,7 +240,7 @@ test("trusted event calls allow their verified trigger actor without changing pu
 test("outcome verification preserves startup failure, current-head checks and review cleanup", async (t) => {
   const step = triggerWorkflow.jobs.review.steps.find((entry) => entry.name.startsWith("Verify review outcomes"));
   assert.equal(step.if, "always() && steps.plan.outputs.run_claude == 'true'");
-  assert.equal(step.env.CADENCE_REVIEW_OUTCOME, "${{ steps.cadence_review.outcome }}");
+  assert.equal(step.env.CADENCE_REVIEW_OUTCOME, "${{ needs.accept.outputs.provider == 'codex' && steps.codex_review.outcome || steps.cadence_review.outcome }}");
   const AsyncFunction = Object.getPrototypeOf(async function () { return undefined; }).constructor;
   const run = new AsyncFunction("require", "github", "context", "core", "process", step.with.script);
   const previousPr = process.env.PR_NUMBER;
@@ -329,7 +329,7 @@ test("events call review only after the existing author-permission router succee
   assert.equal(review.needs, 'route');
   assert.equal(review.if, "needs.route.outputs.should_request_review == 'true'");
   assert.equal(review.uses, './.github/workflows/cadence-ai-review-trigger.yml');
-  assert.equal(review.secrets, 'inherit');
+  assert.deepEqual(Object.keys(review.secrets), Object.keys(triggerWorkflow.on.workflow_call.secrets));
   assert.equal(review.with.pr_number, '${{ needs.route.outputs.pr_number }}');
   assert.equal(route.outputs.should_request_review, '${{ steps.route.outputs.should_request_review }}');
   assert.equal(route.steps.find(step => step.id === 'route').run,
@@ -423,14 +423,14 @@ test("manual matrix and events reuse the same reviewer with sufficient inherited
   assert.equal(manual.jobs.review.uses, events.jobs.review.uses);
   assert.equal(manual.jobs.review.with.pr_number, '${{ matrix.pr_number }}');
   assert.deepEqual(manual.jobs.review.secrets, events.jobs.review.secrets);
-  // Named/empty mappings lose environment secrets in reusable jobs (runner#4453).
-  assert.equal(manual.jobs.review.secrets, 'inherit');
+  // Repository/organization secrets are explicitly forwarded at every hop.
+  assert.deepEqual(Object.keys(manual.jobs.review.secrets), Object.keys(triggerWorkflow.on.workflow_call.secrets));
   assert.equal(triggerWorkflow.jobs.review.environment, "cadence-controller");
   assert.equal(triggerWorkflow.jobs.review.steps.find(step => step.id === "app-token").with["private-key"],
     "${{ secrets.CADENCE_APP_PRIVATE_KEY }}");
   assert.equal(triggerWorkflow.jobs.review.concurrency.queue, 'single');
   assert.equal(triggerWorkflow.jobs.review.concurrency['cancel-in-progress'], false);
-  assert.equal(manual.jobs.resolve.if, "github.ref == 'refs/heads/main'");
+  assert.equal(manual.jobs.resolve.if, "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)");
   for (const caller of [manual, events]) assert.deepEqual(caller.permissions, triggerWorkflow.permissions);
   assert.equal(triggerWorkflow.jobs.review.concurrency.group,
     'cadence-ai-review-${{ github.repository }}-pr-${{ inputs.pr_number || github.event.pull_request.number }}');
@@ -454,7 +454,7 @@ test("closing a PR cancels only its review group; late arrivals skip review plan
   assert.match(metadata.run, /--json state,/);
   assert.match(metadata.run, /printf 'state=%s/);
   assert.equal(review.steps.find(step => step.id === 'plan').if, "steps.started.outputs.active == 'true' && steps.pr.outputs.state == 'OPEN' && steps.pr.outputs.head_sha == fromJSON(needs.accept.outputs.request).head");
-  assert.equal(review.steps.find(step => step.id === 'cadence_review').if, "steps.plan.outputs.run_claude == 'true'");
+  assert.equal(review.steps.find(step => step.id === 'cadence_review').if, "steps.plan.outputs.run_claude == 'true' && needs.accept.outputs.provider == 'claude'");
 });
 
 test("bot allowance never substitutes a human initiator for the Action's write check", () => {

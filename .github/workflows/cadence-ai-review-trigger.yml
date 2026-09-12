@@ -24,11 +24,20 @@ on:
         type: string
   workflow_call:
     secrets:
-      CADENCE_AI_REVIEW_ANTHROPIC_API_KEY:
+      CADENCE_APP_PRIVATE_KEY:
         required: true
+      CADENCE_OPENAI_API_KEY:
+        required: false
+      CADENCE_AI_REVIEW_ANTHROPIC_API_KEY:
+        required: false
       CADENCE_LINEAR_API_TOKEN:
         required: false
     inputs:
+      helpers-ref:
+        description: "Reviewed symphony-client-workflows revision providing the trusted review helpers."
+        type: string
+        required: false
+        default: alpha
       pr_number:
         required: true
         type: string
@@ -47,6 +56,7 @@ permissions:
   pull-requests: write
 
 env:
+  GH_REPO: ${{ github.repository }}
   REPO_SLUG: ${{ github.repository }}
   SYMPHONY_BOT_USER: ${{ vars.SYMPHONY_BOT_USER || 'example-symphony-bot' }}
   CADENCE_REVIEWER: ${{ vars.CADENCE_REVIEWER || 'example-cadence-bot' }}
@@ -69,7 +79,7 @@ jobs:
     name: "Accept PR #${{ inputs.pr_number || github.event.pull_request.number }}"
     if: >-
       ${{
-        github.ref == 'refs/heads/main' &&
+        github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
         (github.event_name != 'pull_request_target' ||
         (
           github.event.action == 'review_requested' &&
@@ -98,9 +108,25 @@ jobs:
       cancel-in-progress: false
       queue: max # Short admission/publication lock; never held during review.
     outputs:
+      provider: ${{ steps.provider.outputs.provider }}
       request: ${{ steps.prepare.outputs.request }}
       check_id: ${{ steps.queued.outputs.check_id }}
     steps:
+      - name: Select review provider
+        id: provider
+        env:
+          CADENCE_OPENAI_API_KEY: ${{ secrets.CADENCE_OPENAI_API_KEY }}
+          CADENCE_AI_REVIEW_ANTHROPIC_API_KEY: ${{ secrets.CADENCE_AI_REVIEW_ANTHROPIC_API_KEY }}
+        run: |
+          if [[ "${CADENCE_OPENAI_API_KEY}" =~ [^[:space:]] ]]; then
+            echo 'provider=codex' >> "${GITHUB_OUTPUT}"
+          elif [[ "${CADENCE_AI_REVIEW_ANTHROPIC_API_KEY}" =~ [^[:space:]] ]]; then
+            echo 'provider=claude' >> "${GITHUB_OUTPUT}"
+          else
+            echo '::error::Configure CADENCE_OPENAI_API_KEY or CADENCE_AI_REVIEW_ANTHROPIC_API_KEY and explicitly forward it to the Cadence review workflow.'
+            exit 1
+          fi
+
       - name: Validate PR number
         env:
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
@@ -113,7 +139,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: main
+          repository: 1000lines/symphony-client-workflows
+          ref: ${{ inputs.helpers-ref || 'alpha' }}
           persist-credentials: false
 
       - name: Mint existing Cadence App token
@@ -188,7 +215,7 @@ jobs:
   review:
     name: "Review PR #${{ inputs.pr_number || github.event.pull_request.number }}"
     needs: accept
-    if: github.ref == 'refs/heads/main' && needs.accept.outputs.check_id != ''
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.accept.outputs.check_id != ''
     environment: cadence-controller
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -212,7 +239,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: main
+          repository: 1000lines/symphony-client-workflows
+          ref: ${{ inputs.helpers-ref || 'alpha' }}
           persist-credentials: false
 
       - name: Mint existing Cadence App token
@@ -318,7 +346,7 @@ jobs:
       # Dry-run cap validation command: re-request `example-cadence-bot` on a
       # sandbox PR already carrying cadence-loop-3. Expected result: request the
       # PR assignee for review, update the workpad when Linear credentials
-      # exist, and skip the Claude review step.
+      # exist, and skip the provider review step.
       - name: Plan visible Cadence review decision
         if: steps.started.outputs.active == 'true' && steps.pr.outputs.state == 'OPEN' && steps.pr.outputs.head_sha == fromJSON(needs.accept.outputs.request).head
         id: plan
@@ -685,28 +713,34 @@ jobs:
             echo "::warning::Optional Cadence Workpad write failed; continuing deterministic review path."
           fi
 
-      - name: Use review-focused CLAUDE.md
+      - name: Use review-focused instructions
         if: steps.plan.outputs.run_claude == 'true'
-        run: cp .claude/skills/cadence-ai-review/review-CLAUDE.md CLAUDE.md
+        run: |
+          cp .claude/skills/cadence-ai-review/review-CLAUDE.md CLAUDE.md
+          cp .claude/skills/cadence-ai-review/review-CLAUDE.md AGENTS.md
 
-      - name: Verify Cadence review configuration
-        if: steps.plan.outputs.run_claude == 'true'
+      - name: Verify Claude review configuration
+        if: steps.plan.outputs.run_claude == 'true' && needs.accept.outputs.provider == 'claude'
         env:
           CADENCE_CLAUDE_MODEL: ${{ vars.CADENCE_CLAUDE_MODEL }}
           CADENCE_HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
         run: node .github/workflows/scripts/verify-cadence-ai-review.cjs --dry-run --require-env
 
-      - name: Run Cadence AI review
+      - name: Run Cadence AI review with Claude
         id: cadence_review
-        if: steps.plan.outputs.run_claude == 'true'
+        if: steps.plan.outputs.run_claude == 'true' && needs.accept.outputs.provider == 'claude'
         uses: anthropics/claude-code-action@30544b674398ee15c84819bd87caf8a87e8c7b55 # v1.0.154
         with:
           anthropic_api_key: ${{ secrets.CADENCE_AI_REVIEW_ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
           # Allow only GitHub-identified bot initiators; humans retain the Action's write check.
           allowed_bots: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.actor.type == 'Bot' && github.event.workflow_run.actor.login || steps.app-token.outputs.app-slug }}
-          prompt: |
+          prompt: &review_prompt |
             /cadence-ai-review
+
+            The checkout contains trusted shared review tooling. Review the target
+            repository in GH_REPO using gh API/PR reads, including its instructions
+            and changed source. Do not execute PR-controlled code.
 
             Review PR #${{ inputs.pr_number || github.event.pull_request.number }} and post one GitHub PR review:
             APPROVE when the PR has no blocker and no human-needed findings,
@@ -740,12 +774,37 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           LINEAR_API_TOKEN: ${{ secrets.CADENCE_LINEAR_API_TOKEN }}
 
+      - name: Configure Codex review network access
+        if: steps.plan.outputs.run_claude == 'true' && needs.accept.outputs.provider == 'codex'
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cadence-codex"
+          printf '[sandbox_workspace_write]\nnetwork_access = true\n' > "${RUNNER_TEMP}/cadence-codex/config.toml"
+
+      - name: Run Cadence AI review with Codex
+        id: codex_review
+        if: steps.plan.outputs.run_claude == 'true' && needs.accept.outputs.provider == 'codex'
+        uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # v1
+        with:
+          openai-api-key: ${{ secrets.CADENCE_OPENAI_API_KEY }}
+          prompt: *review_prompt
+          model: ${{ vars.CADENCE_CODEX_MODEL }}
+          effort: low
+          safety-strategy: drop-sudo
+          sandbox: workspace-write
+          codex-home: ${{ runner.temp }}/cadence-codex
+          # As with Claude, only the verified workflow initiator bypasses the
+          # vendor Action's independent human write-permission check.
+          allow-bot-users: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.actor.type == 'Bot' && github.event.workflow_run.actor.login || steps.app-token.outputs.app-slug }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          LINEAR_API_TOKEN: ${{ secrets.CADENCE_LINEAR_API_TOKEN }}
+
       - name: Verify review outcomes (no false-green; block request-changes)
         if: always() && steps.plan.outputs.run_claude == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
-          CADENCE_REVIEW_OUTCOME: ${{ steps.cadence_review.outcome }}
+          CADENCE_REVIEW_OUTCOME: ${{ needs.accept.outputs.provider == 'codex' && steps.codex_review.outcome || steps.cadence_review.outcome }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -764,7 +823,7 @@ jobs:
   finish:
     name: "Publish Cadence result for PR #${{ inputs.pr_number || github.event.pull_request.number }}"
     needs: [accept, review]
-    if: always() && github.ref == 'refs/heads/main' && needs.accept.outputs.check_id != ''
+    if: always() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.accept.outputs.check_id != ''
     environment: cadence-controller
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -781,7 +840,8 @@ jobs:
       - name: Check out trusted helpers
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: main
+          repository: 1000lines/symphony-client-workflows
+          ref: ${{ inputs.helpers-ref || 'alpha' }}
           persist-credentials: false
       - name: Mint existing Cadence App token
         id: app-token
