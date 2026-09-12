@@ -63,6 +63,47 @@ env:
   SYMPHONY_REPOSITORY_OWNER: ${{ vars.SYMPHONY_REPOSITORY_OWNER || github.repository_owner }}
 
 jobs:
+  reconcile-closed:
+    name: Reconcile Linear after PR close
+    if: github.event_name == 'pull_request_target' && github.event.action == 'closed'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    # Share the repository's non-review Linear mutation lock. Repository-scoped
+    # Actions concurrency cannot serialize other repositories or Linear itself.
+    concurrency:
+      group: symphony-linear-wakeups-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Check out trusted close handler
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: 1000lines/symphony-client-workflows
+          ref: ${{ inputs.helpers-ref || 'main' }}
+          persist-credentials: false
+      - name: Reconcile current PR associations
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          LINEAR_API_TOKEN: ${{ secrets.CADENCE_LINEAR_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const { createGitHubClient } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/symphony-linear-wakeups.mjs`);
+            const { reconcilePrClose } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/symphony-pr-close.mjs`);
+            const repo = `${context.repo.owner}/${context.repo.repo}`;
+            const configuration = await createGitHubClient({ repo, token: process.env.GH_TOKEN }).configuration();
+            const result = await reconcilePrClose({ github, repo, number: context.payload.pull_request.number,
+              teamKey: configuration.config.linear.teamKey, linearToken: process.env.LINEAR_API_TOKEN });
+            const evidence = JSON.stringify({ ...result, configurationSha: configuration.revision,
+              actor: context.actor, runUrl: `${context.serverUrl}/${repo}/actions/runs/${context.runId}`,
+              runAttempt: process.env.GITHUB_RUN_ATTEMPT }, null, 2);
+            core.info(evidence);
+            await core.summary.addRaw('<pre>' + evidence.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;') + '</pre>').write();
+            if (result.operation === 'failed') core.setFailed(result.reason);
+
   cancel-closed:
     if: github.event_name == 'pull_request_target' && github.event.action == 'closed'
     runs-on: ubuntu-latest
