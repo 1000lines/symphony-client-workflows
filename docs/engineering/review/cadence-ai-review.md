@@ -132,6 +132,13 @@ the trusted default branch, read current PR/feedback through `actions/github-scr
 verify the original author's write permission. A failed or denied router cannot
 start the dependent review job. Keep `cadence-controller` restricted to the caller's default branch.
 
+Closure can overtake queued ingress. After validating workflow provenance, PR
+identity, head and feedback ownership, the resolver returns `closed-pr` for a
+now-closed PR (merged or abandoned). Both the review-event and Linear-handoff
+callers log the skip and write it to the Actions summary, without minting an App
+token or forwarding the event. The review job receives `should_request_review=false`.
+Invalid identities, stale heads and invalid provenance still fail validation.
+
 The reusable call retains the caller's event and actor. GitHub-identified bot
 initiators may enter the provider's bot allowlist; humans still pass the provider's
 independent write-permission check. Both providers publish with the minted

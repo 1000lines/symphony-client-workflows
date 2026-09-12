@@ -333,7 +333,7 @@ test("events call review only after the existing author-permission router succee
   assert.equal(review.uses, './.github/workflows/cadence-ai-review-trigger.yml');
   assert.deepEqual(Object.keys(review.secrets), Object.keys(triggerWorkflow.on.workflow_call.secrets));
   assert.equal(review.with.pr_number, '${{ needs.route.outputs.pr_number }}');
-  assert.equal(route.outputs.should_request_review, '${{ steps.route.outputs.should_request_review }}');
+  assert.equal(route.outputs.should_request_review, "${{ steps.route.outputs.should_request_review || 'false' }}");
   assert.equal(route.steps.find(step => step.id === 'route').run,
     'node .github/workflows/scripts/cadence-ai-review-route-event.mjs');
   assert.equal(route.permissions['pull-requests'], 'read');

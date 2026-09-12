@@ -97,11 +97,17 @@ jobs:
             const configuration = await createGitHubClient({ repo, token: process.env.GH_TOKEN }).configuration();
             const result = await reconcilePrClose({ github, repo, number: context.payload.pull_request.number,
               teamKey: configuration.config.linear.teamKey, linearToken: process.env.LINEAR_API_TOKEN });
+            const eventClosedAt = context.payload.pull_request.closed_at;
+            const eventToCompletionMs = Date.parse(result.completedAt) - Date.parse(eventClosedAt);
             const evidence = JSON.stringify({ ...result, configurationSha: configuration.revision,
+              helperSha: require('node:child_process').execFileSync('git', ['rev-parse', 'HEAD'], { cwd: process.env.GITHUB_WORKSPACE, encoding: 'utf8' }).trim(),
+              eventClosedAt: eventClosedAt || null, eventToCompletionMs: Number.isFinite(eventToCompletionMs) ? eventToCompletionMs : null,
               actor: context.actor, runUrl: `${context.serverUrl}/${repo}/actions/runs/${context.runId}`,
               runAttempt: process.env.GITHUB_RUN_ATTEMPT }, null, 2);
             core.info(evidence);
+            await core.summary.addRaw(`### Linear close reconciliation: ${result.operation}\n\nThe independent cancel-closed job may still be queued; its completion does not gate this result.\n\n`).write();
             await core.summary.addRaw('<pre>' + evidence.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;') + '</pre>').write();
+            if (result.operation === 'skipped') core.warning(result.reason);
             if (result.operation === 'failed') core.setFailed(result.reason);
 
   cancel-closed:

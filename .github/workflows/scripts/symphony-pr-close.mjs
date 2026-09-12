@@ -37,8 +37,16 @@ async function pages(read, description) {
 const issueFields = `id identifier updatedAt state { id name type } team { id key }`;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-export async function reconcilePrClose({ github, repo, number, teamKey, linearToken, fetchImpl = fetch }) {
-  const result = { operation: "skipped", repository: repo, number, attempts: 0 };
+export async function reconcilePrClose({ github, repo, number, teamKey, linearToken, fetchImpl = fetch, now = Date.now }) {
+  const started = now();
+  const result = { operation: "skipped", repository: repo, number, attempts: 0,
+    startedAt: new Date(started).toISOString(), timeline: [] };
+  const trace = (phase, fields = {}) => result.timeline.push({ attempt: result.attempts,
+    at: new Date(now()).toISOString(), phase, ...fields });
+  const finish = (outcome) => {
+    const completed = now();
+    return { ...result, ...outcome, completedAt: new Date(completed).toISOString(), durationMs: completed - started };
+  };
   const linear = (query, variables) => linearRequest({ query, variables, token: linearToken,
     fetchImpl, operation: "reconcile closed PR" });
   const readIssue = async (id) => {
@@ -94,13 +102,19 @@ export async function reconcilePrClose({ github, repo, number, teamKey, linearTo
   try {
     for (let attempt = 1; attempt <= 3; attempt++) {
       result.attempts = attempt;
+      trace("attempt-start");
       const before = await snapshot();
+      trace("initial-snapshot", before);
       Object.assign(result, { issue: before.issue.identifier, previousState: before.issue.state.name, prs: before.prs });
-      if (before.prs.some(pr => pr.state === "open")) return { ...result, reason: "associated-pr-open" };
+      if (before.prs.some(pr => pr.state === "open")) return finish({ reason: "associated-pr-open" });
       // Retry with new associations AND new PR reads, not the stale event or a
       // previous desired state. This also catches a reopened triggering PR.
       const current = await snapshot();
-      if (!same(before, current)) continue;
+      trace("verification-snapshot", current);
+      if (!same(before, current)) {
+        trace("retry", { reason: "snapshot-changed", issueChanged: !same(before.issue, current.issue), prsChanged: !same(before.prs, current.prs) });
+        continue;
+      }
       const merged = current.prs.some(pr => pr.merged);
       const states = await pages(async (after) => (await linear(`query CloseStates($id:String!,$after:String) {
         team(id:$id) { states(first:100,after:$after) { nodes { id name type } pageInfo { hasNextPage endCursor } } }
@@ -113,9 +127,14 @@ export async function reconcilePrClose({ github, repo, number, teamKey, linearTo
       // Linear has no compare-and-set issue mutation. Check updatedAt as well
       // as state immediately before writing, and yield to sustained contention.
       const latest = await readIssue(current.issue.id);
-      if (!same(latest, current.issue)) continue;
-      if (latest.state.id === target.id) return { ...result, operation: "unchanged", reason: "already-correct", state: target.name };
-      result.mutation = { issueId: latest.id, stateId: target.id, confirmed: false };
+      trace("prewrite-issue", { issue: latest, targetState: target.name });
+      if (!same(latest, current.issue)) {
+        trace("retry", { reason: "issue-changed-before-write" });
+        continue;
+      }
+      if (latest.state.id === target.id) return finish({ operation: "unchanged", reason: "already-correct", state: target.name });
+      result.mutation = { issueId: latest.id, stateId: target.id, acknowledged: false, confirmed: false };
+      trace("mutation-request", { issueId: latest.id, stateId: target.id });
       let mutationError;
       try {
         const data = await linear(`mutation CloseIssueUpdate($id:String!,$stateId:String!) {
@@ -124,18 +143,21 @@ export async function reconcilePrClose({ github, repo, number, teamKey, linearTo
         if (!data.issueUpdate?.success || data.issueUpdate.issue?.id !== latest.id ||
             data.issueUpdate.issue.state?.id !== target.id) throw new Error("Unconfirmed Linear state mutation.");
         result.mutation.confirmed = true;
+        result.mutation.acknowledged = true;
       } catch (error) { mutationError = error; }
+      trace("mutation-response", { acknowledged: result.mutation.acknowledged });
       // An ambiguous transport failure may have committed. Read it back instead
       // of writing twice. Never fight a writer or undo a newly observed change.
       const observed = await snapshot();
+      trace("readback-snapshot", observed);
       if (observed.issue.id !== latest.id || observed.issue.state.id !== target.id || !same(observed.prs, current.prs)) {
         throw new Error(mutationError ? `Mutation unconfirmed: ${mutationError.message}` : "Concurrent change after mutation; no further writes attempted.");
       }
       result.mutation.confirmed = true;
-      return { ...result, operation: "updated", state: observed.issue.state.name, reason: mutationError ? "confirmed-by-readback" : "all-associated-prs-closed" };
+      return finish({ operation: "updated", state: observed.issue.state.name, reason: mutationError ? "confirmed-by-readback" : "all-associated-prs-closed" });
     }
-    return { ...result, reason: "concurrent-change-retry-limit" };
+    return finish({ reason: "concurrent-change-retry-limit" });
   } catch (error) {
-    return { ...result, operation: "failed", reason: redactToken(error.message, linearToken) };
+    return finish({ operation: "failed", reason: redactToken(error.message, linearToken) });
   }
 }

@@ -22,7 +22,7 @@ export async function resolveCadenceEvent({ github, context }) {
   assert.ok(run.actor?.id && run.actor?.login && run.actor?.type);
   const read = async path => (await github.request(`GET /repos/${repository}${path}`)).data;
   const pr = await read(`/pulls/${number}`);
-  assert.ok(pr.number === number && pr.base?.repo?.full_name === repository && pr.state === "open" && pr.head?.sha);
+  assert.ok(pr.number === number && pr.base?.repo?.full_name === repository && ["open", "closed"].includes(pr.state) && pr.head?.sha);
   assert.ok(eventName === "issue_comment" || head === pr.head.sha, "Stale event head");
   const payload = { action, repository: run.repository, pull_request: pr, sender: run.actor };
   if (eventName !== "pull_request_target") {
@@ -37,5 +37,7 @@ export async function resolveCadenceEvent({ github, context }) {
     payload[review ? "review" : "comment"] = feedback;
     if (comment) payload.issue = { ...pr, pull_request: { url: pr.url } };
   }
-  return { payload, eventName };
+  // Closure can overtake valid queued ingress. Validate all identity/provenance
+  // first, then let both callers stop before credentials or review/handoff work.
+  return { payload, eventName, skipReason: pr.state === "closed" ? "closed-pr" : "" };
 }

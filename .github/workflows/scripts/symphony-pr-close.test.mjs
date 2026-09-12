@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import yaml from "js-yaml";
@@ -51,7 +52,7 @@ function fixture(prs = [pr()]) {
     } else assert.fail(op);
     return { ok: true, json: async () => structuredClone({ data }) };
   };
-  f.run = () => reconcilePrClose({ github: f.github, repo, number: 1, teamKey: "100", linearToken: "fixture-token", fetchImpl: f.fetch });
+  f.run = (options = {}) => reconcilePrClose({ github: f.github, repo, number: 1, teamKey: "100", linearToken: "fixture-token", fetchImpl: f.fetch, ...options });
   return f;
 }
 
@@ -73,6 +74,57 @@ test("duplicate delivery and already-correct state perform no extra write", asyn
   assert.equal((await f.run()).reason, "already-correct");
   assert.equal(f.writes.length, 1);
 });
+
+test("automatic closure without intervention records timed, acknowledged mutation and readback", async () => {
+  const f = fixture([pr(1, { merged: true })]);
+  f.issue.state = { id: "team-inactive", name: "Inactive", type: "started" };
+  let clock = Date.parse("2026-09-12T19:54:38Z");
+  // Synthetic API latency, without runner sleeps or live Linear writes.
+  f.beforePr = f.beforeLinear = () => { clock += 100; };
+  const result = await f.run({ now: () => clock });
+  assert.equal(result.operation, "updated");
+  assert.equal(result.attempts, 1);
+  assert.equal(result.previousState, "Inactive");
+  assert.equal(f.writes.length, 1);
+  assert.equal(result.mutation.acknowledged, true);
+  assert.equal(result.mutation.confirmed, true);
+  assert.equal(result.durationMs, 1500);
+  assert.equal(result.completedAt, "2026-09-12T19:54:39.500Z");
+  assert.deepEqual(result.timeline.map(e => e.phase), ["attempt-start", "initial-snapshot",
+    "verification-snapshot", "prewrite-issue", "mutation-request", "mutation-response", "readback-snapshot"]);
+  assert.equal(result.timeline[1].issue.state.name, "Inactive");
+  assert.equal(result.timeline.at(-1).issue.state.name, "Done");
+  assert.ok(result.timeline.every(e => e.at >= result.startedAt && e.at <= result.completedAt));
+});
+
+for (const issueRead of [2, 3]) {
+  for (const interveningClose of [false, true]) {
+    test(`${interveningClose ? "intervening Done" : "nonterminal concurrent edit"} at issue read ${issueRead} retains retry evidence`, async () => {
+      const f = fixture([pr(1, { merged: true })]);
+      f.issue.state = { id: "team-inactive", name: "Inactive", type: "started" };
+      f.beforeLinear = op => {
+        if (op === "CloseIssue" && f.calls.filter(c => c.op === op).length === issueRead) {
+          f.issue.updatedAt = "concurrent-edit";
+          if (interveningClose) f.issue.state = states[1];
+        }
+      };
+      const result = await f.run();
+      assert.equal(result.attempts, 2);
+      assert.equal(result.operation, interveningClose ? "unchanged" : "updated");
+      assert.equal(f.writes.length, interveningClose ? 0 : 1);
+      assert.equal(result.timeline.find(e => e.phase === "initial-snapshot").issue.state.name, "Inactive");
+      const retries = result.timeline.filter(e => e.phase === "retry");
+      assert.equal(retries.length, 1);
+      assert.equal(retries[0].reason, issueRead === 2 ? "snapshot-changed" : "issue-changed-before-write");
+      if (issueRead === 2) assert.equal(retries[0].prsChanged, false);
+      if (interveningClose) {
+        assert.equal(result.reason, "already-correct");
+        assert.equal(result.mutation, undefined);
+        assert.ok(!result.timeline.some(e => e.phase === "mutation-request"));
+      } else assert.equal(result.mutation.acknowledged, true);
+    });
+  }
+}
 
 test("paginates all associations and workflow states; deduplicates cross-repository URLs", async () => {
   const other = pr(2, { html_url: "https://github.com/elsewhere/service/pull/2", base: { repo: { full_name: "elsewhere/service" } }, merged: true });
@@ -168,13 +220,17 @@ test("sustained contention has a bounded retry limit", async () => {
   const result = await f.run();
   assert.equal(result.reason, "concurrent-change-retry-limit");
   assert.equal(result.attempts, 3);
+  assert.equal(result.timeline.filter(e => e.phase === "retry").length, 3);
   assert.equal(f.writes.length, 0);
 });
 
 test("ambiguous mutation transport result is confirmed by fresh reads without rewriting", async () => {
   const f = fixture();
   f.afterMutation = () => { throw new Error("connection lost"); };
-  assert.equal((await f.run()).reason, "confirmed-by-readback");
+  const result = await f.run();
+  assert.equal(result.reason, "confirmed-by-readback");
+  assert.equal(result.mutation.acknowledged, false);
+  assert.equal(result.mutation.confirmed, true);
   assert.equal(f.writes.length, 1);
 });
 
@@ -213,12 +269,16 @@ test("the existing close workflow runs the deterministic helper with only read G
   let summary = "";
   const core = { info() {}, setFailed: assert.fail, summary: { addRaw(value) { summary += value; return this; }, async write() {} } };
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  await new AsyncFunction("github", "context", "core", "process", step.with.script)(f.github, {
-    repo: { owner: "owner", repo: "client" }, payload: { pull_request: { number: 1, merged: false } },
+  await new AsyncFunction("github", "context", "core", "process", "require", step.with.script)(f.github, {
+    repo: { owner: "owner", repo: "client" }, payload: { pull_request: { number: 1, merged: false, closed_at: "2026-09-12T19:54:17Z" } },
     actor: "human", serverUrl: "https://github.com", runId: 123,
-  }, core, { env: { GITHUB_WORKSPACE: fileURLToPath(new URL("../../../", import.meta.url)), GH_TOKEN: "github-fixture", LINEAR_API_TOKEN: "fixture-token", GITHUB_RUN_ATTEMPT: "1" } });
+  }, core, { env: { GITHUB_WORKSPACE: fileURLToPath(new URL("../../../", import.meta.url)), GH_TOKEN: "github-fixture", LINEAR_API_TOKEN: "fixture-token", GITHUB_RUN_ATTEMPT: "1" } }, createRequire(import.meta.url));
   assert.equal(f.issue.state.name, "Done"); // current API merged=true overrides stale payload
   assert.match(summary, /all-associated-prs-closed/);
   assert.match(summary, /actions\/runs\/123/);
+  assert.match(summary, /Linear close reconciliation: updated/);
+  assert.match(summary, /independent cancel-closed job/);
+  assert.match(summary, /"helperSha": "[a-f0-9]{40}"/);
+  assert.match(summary, /"eventToCompletionMs": \d+/);
   assert.equal(prReference(`${url}?tab=files#diff`).url, url);
 });
