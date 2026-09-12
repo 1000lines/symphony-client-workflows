@@ -21,13 +21,15 @@ permissions:
   actions: read
 
 jobs:
-  cleanup:
+  pointers:
     if: >-
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       contains(fromJSON('["workflow_run","workflow_dispatch","pull_request_target"]'), github.event.workflow_run.event)
     environment: cadence-controller
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      numbers: ${{ steps.pointers.outputs.numbers }}
     steps:
       - name: Find this attempt's recovery pointers
         id: pointers
@@ -38,25 +40,40 @@ jobs:
             const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
               ...context.repo, run_id: run.id, per_page: 100,
             });
-            core.setOutput('found', artifacts.some(item => !item.expired && item.name.startsWith(`cadence-check-${run.run_attempt}-`)));
+            const prefix = `cadence-check-${run.run_attempt}-`;
+            const numbers = artifacts.filter(item => !item.expired && item.name.startsWith(prefix))
+              .map(item => item.name.slice(prefix.length)).filter(number => /^[1-9][0-9]*$/.test(number));
+            core.setOutput('numbers', JSON.stringify([...new Set(numbers)]));
+
+  cleanup:
+    needs: pointers
+    if: needs.pointers.outputs.numbers != '[]' && needs.pointers.outputs.numbers != ''
+    environment: cadence-controller
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        number: ${{ fromJSON(needs.pointers.outputs.numbers) }}
+    concurrency:
+      group: cadence-check-publication-${{ github.repository }}-pr-${{ matrix.number }}
+      cancel-in-progress: false
+      queue: max
+    steps:
       - name: Check out trusted helpers
-        if: steps.pointers.outputs.found == 'true'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: 1000lines/symphony-client-workflows
           ref: ${{ inputs.helpers-ref || 'alpha' }}
           persist-credentials: false
       - name: Download recovery pointers as data
-        if: steps.pointers.outputs.found == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           github-token: ${{ github.token }}
           run-id: ${{ github.event.workflow_run.id }}
-          pattern: cadence-check-${{ github.event.workflow_run.run_attempt }}-*
+          name: cadence-check-${{ github.event.workflow_run.run_attempt }}-${{ matrix.number }}
           path: ${{ runner.temp }}/cadence-check-pointers
-          merge-multiple: true
       - name: Mint existing Cadence App token
-        if: steps.pointers.outputs.found == 'true'
         id: app-token
         uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # v2.1.1
         with:
@@ -65,16 +82,19 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-checks: write
+          permission-pull-requests: write
       - name: Close checks whose run ended without publication
-        if: steps.pointers.outputs.found == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const { recoverCheck } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/cadence-review-check.mjs`);
+            const { publishRequestComment } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/cadence-review-comment.mjs`);
             const fs = require('node:fs');
             const directory = `${process.env.RUNNER_TEMP}/cadence-check-pointers`;
             for (const file of fs.readdirSync(directory)) {
               const request = JSON.parse(fs.readFileSync(`${directory}/${file}`, 'utf8'));
+              if (String(request.number) !== '${{ matrix.number }}') throw new Error('Recovery pointer does not match the locked PR');
               await recoverCheck(github, context, request, '${{ vars.CADENCE_APP_ID }}', context.payload.workflow_run);
+              await publishRequestComment(github, request, { id: '${{ vars.CADENCE_APP_ID }}', slug: '${{ steps.app-token.outputs.app-slug }}' });
             }

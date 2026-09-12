@@ -14,11 +14,13 @@ const workflow = readFileSync(
 );
 const trigger = readFileSync(new URL("../cadence-ai-review-trigger.yml", import.meta.url), "utf8");
 const triggerWorkflow = yaml.load(trigger);
+const runSource = readFileSync(new URL("../cadence-ai-review-run.yml", import.meta.url), "utf8");
+const runWorkflow = yaml.load(runSource);
 
 test("native review publication and recognition share the minted App identity", () => {
   const token = "${{ steps.app-token.outputs.token }}";
   const login = "${{ steps.app-token.outputs.app-slug }}[bot]";
-  const steps = triggerWorkflow.jobs.review.steps;
+  const steps = runWorkflow.jobs.review.steps;
   const mint = steps.find((step) => step.id === "app-token");
   assert.equal(mint.with.repositories, "${{ github.event.repository.name }}");
   for (const permission of ["pull-requests", "issues", "checks"]) {
@@ -66,7 +68,7 @@ test("native review publication and recognition share the minted App identity", 
 });
 
 test("publishing preflight rejects missing App identity, user tokens and wrong repository scope", async () => {
-  const steps = triggerWorkflow.jobs.review.steps;
+  const steps = runWorkflow.jobs.review.steps;
   const step = steps.find(
     (step) => step.name === "Verify Cadence publishing identity"
   );
@@ -225,7 +227,7 @@ test("trusted event calls allow their verified trigger actor without changing pu
   assert.deepEqual(Object.keys(triggerWorkflow.on), [
     "pull_request_target", "workflow_dispatch", "workflow_call",
   ]);
-  const steps = triggerWorkflow.jobs.review.steps;
+  const steps = runWorkflow.jobs.review.steps;
   const review = steps.find((step) => step.id === "cadence_review");
   assert.equal(review.uses, "anthropics/claude-code-action@30544b674398ee15c84819bd87caf8a87e8c7b55");
 
@@ -233,14 +235,14 @@ test("trusted event calls allow their verified trigger actor without changing pu
   assert.equal(review.with.github_token, '${{ steps.app-token.outputs.token }}');
   assert.equal(review.with.allowed_non_write_users, undefined);
   assert.equal(review["continue-on-error"], undefined);
-  assert.equal(triggerWorkflow.jobs.review.environment, "cadence-controller");
+  assert.equal(runWorkflow.jobs.review.environment, "cadence-controller");
   assert.equal(steps.find((step) => step.id === "plan").env.TRIGGER_ACTOR, "${{ github.actor }}");
 });
 
 test("outcome verification preserves startup failure, current-head checks and review cleanup", async (t) => {
-  const step = triggerWorkflow.jobs.review.steps.find((entry) => entry.name.startsWith("Verify review outcomes"));
+  const step = runWorkflow.jobs.review.steps.find((entry) => entry.name.startsWith("Verify review outcomes"));
   assert.equal(step.if, "always() && steps.plan.outputs.run_claude == 'true'");
-  assert.equal(step.env.CADENCE_REVIEW_OUTCOME, "${{ needs.accept.outputs.provider == 'codex' && steps.codex_review.outcome || steps.cadence_review.outcome }}");
+  assert.equal(step.env.CADENCE_REVIEW_OUTCOME, "${{ inputs.provider == 'codex' && steps.codex_review.outcome || steps.cadence_review.outcome }}");
   const AsyncFunction = Object.getPrototypeOf(async function () { return undefined; }).constructor;
   const run = new AsyncFunction("require", "github", "context", "core", "process", step.with.script);
   const previousPr = process.env.PR_NUMBER;
@@ -295,18 +297,18 @@ test("outcome verification preserves startup failure, current-head checks and re
 });
 
 test("the review trigger uses the existing App for feedback permission reads", () => {
-  const stateStep = trigger.match(/- name: Fetch PR review state\n[\s\S]*?(?=\n      - name:)/)?.[0];
+  const stateStep = runSource.match(/- name: Fetch PR review state\n[\s\S]*?(?=\n      - name:)/)?.[0];
   assert.match(stateStep, /GH_TOKEN: \$\{\{ steps.app-token.outputs.token \}\}/);
   assert.match(trigger, /environment: cadence-controller/);
   assert.match(trigger, /app-id: \$\{\{ vars.CADENCE_APP_ID \}\}/);
-  assert.match(trigger, /permission-pull-requests: read/);
+  assert.match(trigger, /permission-pull-requests: write/);
 });
 
 test("App review requests reach the trigger and only the minted App identity passes its bot guard", () => {
   assert.match(trigger, /github.event.sender.type == 'Bot'/);
   const guard = trigger.match(/- name: Verify App review requester\n[\s\S]*?(?=\n      - name:)/)?.[0];
   assert.ok(guard, "review-request bot guard must precede review work");
-  assert.ok(trigger.indexOf(guard) < trigger.indexOf("- name: Fetch PR review state"));
+  assert.equal(triggerWorkflow.jobs.review.needs, "accept");
   assert.match(guard, /if: github.event_name == 'pull_request_target'/);
   assert.match(guard, /APP_SLUG: \$\{\{ steps.app-token.outputs.app-slug \}\}/);
   const script = guard.split("run: |\n")[1].replace(/^          /gm, "");
@@ -425,8 +427,8 @@ test("manual matrix and events reuse the same reviewer with sufficient inherited
   assert.deepEqual(manual.jobs.review.secrets, events.jobs.review.secrets);
   // Repository/organization secrets are explicitly forwarded at every hop.
   assert.deepEqual(Object.keys(manual.jobs.review.secrets), Object.keys(triggerWorkflow.on.workflow_call.secrets));
-  assert.equal(triggerWorkflow.jobs.review.environment, "cadence-controller");
-  assert.equal(triggerWorkflow.jobs.review.steps.find(step => step.id === "app-token").with["private-key"],
+  assert.equal(runWorkflow.jobs.review.environment, "cadence-controller");
+  assert.equal(runWorkflow.jobs.review.steps.find(step => step.id === "app-token").with["private-key"],
     "${{ secrets.CADENCE_APP_PRIVATE_KEY }}");
   assert.equal(triggerWorkflow.jobs.review.concurrency.queue, 'single');
   assert.equal(triggerWorkflow.jobs.review.concurrency['cancel-in-progress'], false);
@@ -450,15 +452,15 @@ test("closing a PR cancels only its review group; late arrivals skip review plan
   assert.equal(group(cancel, 18), group(review, 18));
   assert.equal(group(cancel, 18), group(review, undefined, { pr_number: '18' }));
   assert.notEqual(group(cancel, 18), group(review, 20));
-  const metadata = review.steps.find(step => step.id === 'pr');
+  const metadata = runWorkflow.jobs.review.steps.find(step => step.id === 'pr');
   assert.match(metadata.run, /--json state,/);
   assert.match(metadata.run, /printf 'state=%s/);
-  assert.equal(review.steps.find(step => step.id === 'plan').if, "steps.started.outputs.active == 'true' && steps.pr.outputs.state == 'OPEN' && steps.pr.outputs.head_sha == fromJSON(needs.accept.outputs.request).head");
-  assert.equal(review.steps.find(step => step.id === 'cadence_review').if, "steps.plan.outputs.run_claude == 'true' && needs.accept.outputs.provider == 'claude'");
+  assert.equal(runWorkflow.jobs.review.steps.find(step => step.id === 'plan').if, "needs.start.outputs.active == 'true' && steps.pr.outputs.state == 'OPEN' && steps.pr.outputs.head_sha == fromJSON(inputs.request).head");
+  assert.equal(runWorkflow.jobs.review.steps.find(step => step.id === 'cadence_review').if, "steps.plan.outputs.run_claude == 'true' && inputs.provider == 'claude'");
 });
 
 test("bot allowance never substitutes a human initiator for the Action's write check", () => {
-  const expression = triggerWorkflow.jobs.review.steps.find(step => step.id === 'cadence_review')
+  const expression = runWorkflow.jobs.review.steps.find(step => step.id === 'cadence_review')
     .with.allowed_bots.slice(3, -2).replace('steps.app-token.outputs.app-slug', "steps['app-token'].outputs['app-slug']");
   const evaluate = new Function('github', 'steps', `return ${expression}`);
   const steps = { 'app-token': { outputs: { 'app-slug': 'configured-app' } } };

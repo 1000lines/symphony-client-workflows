@@ -302,7 +302,7 @@ test("Cadence human-review workflows do not request broad teams", () => {
   const workflowPaths = [
     new URL("../.github/workflows/cadence-linear-rework.yml", import.meta.url),
     new URL(
-      "../.github/workflows/cadence-ai-review-trigger.yml",
+      "../.github/workflows/cadence-ai-review-run.yml",
       import.meta.url
     ),
   ];
