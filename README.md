@@ -31,8 +31,10 @@ The reusable `symphony-linear-wakeups.yml` accepts the generated caller's
 select open Symphony PRs targeting the pushed branch. Scheduled recovery checks
 all open Symphony PRs every 15 minutes, including nondefault bases. GitHub may
 return unknown mergeability while computing it; a later scan retries without
-waking or consuming a receipt. The existing CI path yields conflicted/unknown
-PRs to the conflict bridge.
+waking or consuming a receipt. The CI path yields conflicted PRs to the conflict
+bridge. Unknown mergeability during CI evaluation or its final PR recheck puts
+waiting issues in `Unhappy` with `wake:15m`; the existing Symphony timer rechecks
+the PR and CI even if no further GitHub check event arrives.
 
 Only the explicitly mapped `CADENCE_LINEAR_API_TOKEN` is required. It needs
 Linear issue/team/project read access, Cadence workpad writes and issue state

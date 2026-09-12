@@ -187,7 +187,7 @@ jobs:
             const pull_number = Number(process.env.PR_NUMBER);
             const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number });
             if (pr.state !== 'open' || pr.head.sha !== process.env.HEAD_SHA) return;
-            if (pr.mergeable !== true) return core.info('Conflict bridge owns conflicted or unknown mergeability; scheduled recovery will recheck.');
+            if (pr.mergeable !== true && pr.mergeable !== null) return core.info('Conflict bridge owns conflicted PRs; scheduled recovery will recheck.');
             const { createGitHubClient, requiredCi } = await import(`${process.env.HELPER_ROOT}/.github/workflows/scripts/symphony-linear-wakeups.mjs`);
             const client = createGitHubClient({ repo: process.env.TARGET_REPOSITORY, token: process.env.GH_TOKEN });
             const config = JSON.parse(process.env.TARGET_CONFIG);
@@ -196,8 +196,10 @@ jobs:
                 !config.ci.requiredChecks.some(check => check.workflow === event.workflow_run.path)) {
               return core.info('Workflow completion is outside the configured CI contract.');
             }
-            const ci = await requiredCi({ github: client, number: pull_number,
-              headSha: pr.head.sha, requiredChecks: config.ci.requiredChecks });
+            const ci = pr.mergeable === null
+              ? { state: 'Unhappy', reason: 'Mergeability is unknown; wake:15m timer will recheck the PR and CI.' }
+              : await requiredCi({ github: client, number: pull_number,
+                  headSha: pr.head.sha, requiredChecks: config.ci.requiredChecks });
             await core.summary.addRaw('CI evidence\n\n```json\n' + JSON.stringify(ci, null, 2) + '\n```\n').write();
             let { state, reason } = ci;
             core.setOutput('state', state);
@@ -218,7 +220,6 @@ jobs:
             const { linearRequest, readLinearIssue, terminalStateReason } = await import(`${process.env.HELPER_ROOT}/scripts/linear-issue-wakeup.mjs`);
             const token = process.env.LINEAR_API_TOKEN;
             const options = { issueIdentifier: process.env.ISSUE, token };
-            const wantsWake = process.env.TARGET_STATE === 'Unhappy';
             const hasWakeLabel = (issue, wakeId) => {
               if (!issue.labels || issue.labels.pageInfo.hasNextPage) throw new Error('Issue label lookup is incomplete.');
               return issue.labels.nodes.some(label => label.id === wakeId);
@@ -227,11 +228,16 @@ jobs:
             for (let attempt = 0; attempt < 2; attempt++) {
               const issue = await readLinearIssue(options);
               const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(process.env.PR_NUMBER) });
-              if (terminalStateReason(issue.state) || issue.state.name !== process.env.PREVIOUS_STATE || pr.state !== 'open' || pr.head.sha !== process.env.HEAD_SHA || pr.mergeable !== true) {
+              if (terminalStateReason(issue.state) || issue.state.name !== process.env.PREVIOUS_STATE || pr.state !== 'open' || pr.head.sha !== process.env.HEAD_SHA || (pr.mergeable !== true && pr.mergeable !== null)) {
                 return core.info('Ticket or PR changed; leaving it alone.');
               }
-              const target = issue.team.states.nodes.find(state => state.name === process.env.TARGET_STATE);
-              if (!target || terminalStateReason(target)) throw new Error(`Missing safe Linear state: ${process.env.TARGET_STATE}`);
+              // A base update can make mergeability unknown after CI was read.
+              // Keep a timer even when this is the last CI event for the head.
+              const targetState = pr.mergeable === null ? 'Unhappy' : process.env.TARGET_STATE;
+              const reason = pr.mergeable === null ? 'Mergeability is unknown; wake:15m timer will recheck the PR and CI.' : process.env.REASON;
+              const wantsWake = targetState === 'Unhappy';
+              const target = issue.team.states.nodes.find(state => state.name === targetState);
+              if (!target || terminalStateReason(target)) throw new Error(`Missing safe Linear state: ${targetState}`);
               const labels = await linearRequest({ token, operation: 'find wake label',
                 query: 'query($id:String!){issue(id:$id){team{labels(first:100){nodes{id name} pageInfo{hasNextPage}}}}}',
                 variables: { id: issue.id } });
@@ -264,7 +270,7 @@ jobs:
               if (updated.state.id !== target.id || hasWakeLabel(updated, wake.id) !== wantsWake) {
                 throw new Error('Ticket state/wake label readback did not match; leaving the newer values alone.');
               }
-              const evidence = `${issue.identifier}: ${issue.state.name} -> ${updated.state.name}. ${process.env.REASON} PR ${process.env.PR_NUMBER}, head ${process.env.HEAD_SHA}.`;
+              const evidence = `${issue.identifier}: ${issue.state.name} -> ${updated.state.name}. ${reason} PR ${process.env.PR_NUMBER}, head ${process.env.HEAD_SHA}.`;
               await core.summary.addRaw(evidence).write();
               return core.info(evidence);
             }

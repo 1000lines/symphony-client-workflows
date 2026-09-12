@@ -1353,6 +1353,8 @@ async function runWorkflowFixture(
     eventName = "pull_request_target",
     currentState = "Inactive",
     conflict = false,
+    mergeability = !conflict,
+    changedMergeability,
     ci = null,
     changedState = "",
     changedHead = false,
@@ -1392,7 +1394,7 @@ async function runWorkflowFixture(
     head: { ...pr().head, ref: prBranch },
     mergeable: conflict,
   });
-  currentPr.mergeable = !conflict;
+  currentPr.mergeable = mergeability;
   const states = ["Active", "Inactive", "Unhappy", "Done", "Backlog"].map(
     (name) => ({ id: name, name })
   );
@@ -1689,6 +1691,8 @@ async function runWorkflowFixture(
     });
   if (changedState) live.state = changedState;
   if (changedHead) currentPr.head.sha = "new-head";
+  if (changedMergeability !== undefined)
+    currentPr.mergeable = changedMergeability;
   for (
     let attempt = 0;
     outcome.state && attempt < (duplicate ? 2 : 1);
@@ -1702,6 +1706,37 @@ async function runWorkflowFixture(
   }
   return { writes, waits, outputs, infos, snapshots, issue: issue() };
 }
+
+for (const phase of ["outcome", "mutation"]) {
+  test(`YAML workflow: unknown mergeability at ${phase} schedules CI recovery`, async (t) => {
+    const { writes, issue, infos } = await runWorkflowFixture(t, {
+      eventName: "workflow_run",
+      currentState: "Inactive",
+      ci: "success",
+      ...(phase === "outcome"
+        ? { mergeability: null }
+        : { changedMergeability: null }),
+    });
+    assert.deepEqual(writes.find((write) => write.kind === "state")?.input, {
+      stateId: "Unhappy",
+      addedLabelIds: ["wake"],
+    });
+    assert.equal(issue.state.name, "Unhappy");
+    assert.match(infos.join("\n"), /[Mm]ergeability.*unknown.*timer/);
+  });
+}
+
+test("YAML workflow: conflict discovered before CI mutation remains owned by conflict bridge", async (t) => {
+  const { writes } = await runWorkflowFixture(t, {
+    eventName: "workflow_run",
+    ci: "success",
+    changedMergeability: false,
+  });
+  assert.equal(
+    writes.some((write) => write.kind === "state"),
+    false
+  );
+});
 
 for (const [name, options, expected] of [
   ["pending CI sleeps", {}, "Unhappy"],
