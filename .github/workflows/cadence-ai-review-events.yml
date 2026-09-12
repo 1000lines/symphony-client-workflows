@@ -50,7 +50,8 @@ jobs:
       issues: read
       pull-requests: read
     outputs:
-      should_request_review: ${{ steps.route.outputs.should_request_review }}
+      should_request_review: ${{ steps.route.outputs.should_request_review || 'false' }}
+      skip_reason: ${{ steps.resolve.outputs.skip_reason || steps.route.outputs.skip_reason }}
       pr_number: ${{ steps.route.outputs.pr_number }}
       trigger_source: ${{ steps.route.outputs.trigger_source }}
       trigger_actor: ${{ steps.route.outputs.trigger_actor }}
@@ -63,17 +64,26 @@ jobs:
           persist-credentials: false
 
       - name: Read current event from GitHub
+        id: resolve
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const { resolveCadenceEvent } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/cadence-forwarded-event.mjs`);
-            const { payload, eventName } = await resolveCadenceEvent({ github, context });
+            const { payload, eventName, skipReason } = await resolveCadenceEvent({ github, context });
+            core.setOutput('skip_reason', skipReason);
+            if (skipReason) {
+              const message = `Skipped ${eventName}.${payload.action} for ${context.repo.owner}/${context.repo.repo}#${payload.pull_request.number}: ${skipReason}`;
+              core.info(message);
+              await core.summary.addRaw(`${message}\n`).write();
+              return;
+            }
             const path = `${process.env.RUNNER_TEMP}/cadence-event.json`;
             require('node:fs').writeFileSync(path, JSON.stringify(payload));
             core.exportVariable('CADENCE_EVENT_PATH', path);
             core.exportVariable('CADENCE_EVENT_NAME', eventName);
 
       - name: Mint existing Cadence App token
+        if: steps.resolve.outputs.skip_reason == ''
         id: app-token
         uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # v2.1.1
         with:
@@ -86,6 +96,7 @@ jobs:
           permission-pull-requests: write
 
       - name: Classify and gate event
+        if: steps.resolve.outputs.skip_reason == ''
         id: route
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}

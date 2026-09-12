@@ -37,6 +37,24 @@ write. The Actions log and summary retain the evaluated PRs, issue, previous and
 confirmed target state, attempts, mutation confirmation, reason, actor, config
 revision, and run URL/attempt. The handler does not edit an agent's Linear workpad.
 
+The summary names `updated`, `unchanged`, `skipped`, or `failed` explicitly.
+`updated` includes a mutation request and readback; `mutation.acknowledged`
+distinguishes an accepted API response from an ambiguous transport result whose
+target state was subsequently observed. Readback alone cannot identify the writer.
+`unchanged` / `already-correct` makes no mutation and is not automatic-closure proof.
+`skipped` records why no terminal write was appropriate (including exhausted
+contention); `failed` fails the job. Inspect this job independently of
+`cancel-closed`, which can still be queued after reconciliation finishes.
+
+`timeline` retains each attempt's initial and verification snapshots, final issue
+version, retry reason, mutation acknowledgement and readback, with timestamps.
+`startedAt`, `completedAt`, and `durationMs` measure the helper; `eventClosedAt`
+and `eventToCompletionMs` measure close-to-result latency, including scheduling
+and setup. The latter is not necessarily time to a state transition. `helperSha`
+identifies the checked-out helper; the run's reusable-workflow revision and
+`configurationSha` identify the other inputs. No PR bodies or credentials are
+included in the snapshot trace.
+
 ## Concurrency and existing automation
 
 On September 12, 2026, API inspection confirmed the 1000lines Linear workspace
@@ -98,3 +116,70 @@ These fixtures validate wiring and permission declarations, not secret grants,
 live event delivery, or a production terminal transition. Retain the real close
 run summary and Linear state readback as follow-up evidence. The commissioned
 issue explicitly permits that live gap before approval/merge.
+
+## Investigation: 100-107 / pytest-memray PR #8
+
+The [reported test](https://linear.app/1000lines/issue/100-115) did **not** prove
+automatic closure. Jeremy confirmed that he manually moved 100-107 to Done.
+The handler subsequently returned `unchanged` / `already-correct`, attempt 2,
+without a mutation. It consumed workflow and helper
+`0c7deb90ed3b82a2019ed1982e983b0edcf62e6b`, which already contained PR #16's
+handler; this was not a stale-client rollout.
+
+Observed September 12, 2026 UTC, from the [close job log and run](https://github.com/jeremycarroll/pytest-memray/actions/runs/34715518895/job/103611929236),
+[PR #8](https://github.com/jeremycarroll/pytest-memray/pull/8), and Linear issue history:
+
+| Event | UTC time | Elapsed since merge |
+| --- | --- | --- |
+| PR #8 merged | 19:54:17 | 0 s |
+| Close workflow created | 19:54:23 | 6 s |
+| Reconciliation job started (Jobs API) | 19:54:35 | 18 s |
+| Reconciliation script step began (includes config reads) | 19:54:37.777 | 20.777 s |
+| Jeremy's Inactive → Done history entry | 19:54:45.878 | 28.878 s |
+| Handler logged `already-correct`, no mutation | 19:54:51.360 | 34.360 s |
+| Reconciliation job completed (Jobs API) | 19:54:53 | 36 s |
+| Independent cancel-closed job started | 19:59:27 | 310 s |
+| Entire close workflow completed | 19:59:33 | 316 s |
+
+The handler was still processing when Jeremy intervened, about 8.1 seconds after
+the script step started and 5.5 seconds before its result. Revision `0c7deb9`
+reaches attempt 2 only when its two full snapshots differ or the final Linear
+issue re-read differs. It has no retry sleep; those attempts repeat API reads.
+An open associated PR or lookup failure on attempt 1 would have returned, and
+a mutation attempt would have returned or failed without entering attempt 2.
+Thus the observed run retried a detected change before any mutation.
+
+The original log contains neither initial snapshot nor retry reason/timestamps,
+so it cannot establish which comparison changed, its initial state/associations,
+or whether that change was Jeremy's edit. His edit is a plausible competing
+write, not a proven cause of that particular retry. History has one state
+transition in this window (Jeremy's manual change) and a separate actorless
+entry at 19:54:46.038 with no state transition. Current attachments contain only
+PR #8; they do not reconstruct historical snapshots. Native team automation still
+maps merge to Done, but its internal processing/retry timing is unavailable.
+There is no evidence here of another state writer reversing an automatic close.
+
+The [review event failure](https://github.com/jeremycarroll/pytest-memray/actions/runs/34715515951/job/103611921453)
+and [review handoff failure](https://github.com/jeremycarroll/pytest-memray/actions/runs/34715511482/job/103611910187)
+both hit the resolver's open-PR assertion after closure. Neither gates the
+independent reconciliation job. The nearby CI wakeup run's mutation job started
+at 19:54:55, after reconciliation; the long cancel-closed wait also did not gate it.
+
+No permanent closure defect or normal end-to-end automatic latency is established
+by this interrupted observation. Deterministic fixtures now cover both possible
+retry sites: a concurrent Done edit yields no write; a nonterminal edit retries
+and the handler completes automatically. With no competing edit, an Inactive
+fixture reaches Done with one acknowledged mutation/readback. Its 1,500 ms is
+**synthetic** (100 ms per fixture API call), not production latency. The closure
+decision and three-attempt concurrency safeguards remain unchanged; the added
+trace makes a future failure diagnosable.
+
+Live proof belongs to [100-117](https://linear.app/1000lines/issue/100-117) after
+[100-116](https://linear.app/1000lines/issue/100-116) provisions the dedicated test
+repository. Preserve single merged, single abandoned, any open, all closed with
+a merge, all abandoned, deduplication/repeated delivery, and delayed review-event
+cases. Use fixture issues and PRs, observe through job completion without manual
+status edits, and retain revisions, timing, mutation acknowledgement and API/history
+readbacks. No original issue was changed, workflow rerun, PR merged, or runtime
+deployed during this investigation. Live proof remains follow-up, not this fix's
+merge prerequisite.

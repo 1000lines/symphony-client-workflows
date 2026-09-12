@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { resolveCadenceEvent } from "./cadence-forwarded-event.mjs";
 import { routeCadenceReviewEvent } from "./cadence-ai-review-route-event.mjs";
@@ -85,7 +86,7 @@ for (const [name, change] of [
   ["stale head", f => { f.pr.head.sha = "b".repeat(40); }],
   ["wrong PR", f => { f.pr.number = 8; }],
   ["wrong base repository", f => { f.pr.base.repo.full_name = "writer/fork"; }],
-  ["closed PR", f => { f.pr.state = "closed"; }],
+  ["invalid PR state", f => { f.pr.state = "unknown"; }],
   ["missing author", f => { delete f.feedback.user; }],
   ["wrong feedback ID", f => { f.feedback.id = 11; }],
   ["wrong feedback parent", f => { f.feedback.pull_request_url += "0"; }],
@@ -97,6 +98,61 @@ for (const [name, change] of [
     await assert.rejects(resolve(f));
   });
 }
+
+for (const workflowName of ["cadence-ai-review-events", "cadence-linear-rework"]) {
+  const events = [["pull_request_review", "submitted"], ["issue_comment", "created"]];
+  if (workflowName === "cadence-ai-review-events") events.push(
+    ["pull_request_target", "ready_for_review"], ["pull_request_review_comment", "created"]);
+  for (const [eventName, action] of events) {
+    for (const merged of [false, true]) {
+      test(`${workflowName} skips ${eventName} ingress resolved after PR ${merged ? "merge" : "closure"}`, async () => {
+        const f = fixture(eventName, action); // Ingress was queued at this open PR/head.
+        assert.equal((await resolve(f)).payload.pull_request.state, "open");
+        f.pr.state = "closed";
+        f.pr.merged = merged;
+        const workflow = yaml.load(readFileSync(new URL(`../${workflowName}.yml`, import.meta.url), "utf8"));
+        const job = workflow.jobs.route || workflow.jobs["review-handoff"];
+        const step = job.steps.find(s => s.name === "Read current event from GitHub");
+        assert.equal(step.id, "resolve");
+        const outputs = {}, messages = [];
+        const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+        await new AsyncFunction("github", "context", "core", "process", "require", step.with.script)(
+          f.github, f.context, {
+            setOutput: (key, value) => { outputs[key] = value; },
+            exportVariable: () => assert.fail("Closed event must not be forwarded"),
+            info: message => messages.push(message),
+            summary: { addRaw(message) { messages.push(message); return this; }, async write() {} },
+          }, { env: { GITHUB_WORKSPACE: fileURLToPath(new URL("../../../", import.meta.url)) } },
+          () => assert.fail("Closed event must not write a payload file"));
+        assert.equal(outputs.skip_reason, "closed-pr");
+        assert.ok(messages.some(message => message.includes("closed-pr") && message.includes(`${repository}#7`)));
+        // Execute the actual resolver above, then check the native caller gates:
+        // no App token, classifier, Linear handoff or downstream review can run.
+        for (const dependent of job.steps.filter(s => s.id === "app-token" || s.run)) {
+          assert.equal(dependent.if, "steps.resolve.outputs.skip_reason == ''");
+          assert.notEqual(outputs.skip_reason, "");
+        }
+        if (workflow.jobs.review) {
+          assert.equal(job.outputs.should_request_review, "${{ steps.route.outputs.should_request_review || 'false' }}");
+          assert.equal(workflow.jobs.review.if, "needs.route.outputs.should_request_review == 'true'");
+        }
+      });
+    }
+  }
+}
+
+for (const change of [
+  f => { f.run.path = ".github/workflows/untrusted.yml"; },
+  f => { f.pr.number = 8; },
+  f => { f.pr.base.repo.full_name = "elsewhere/repo"; },
+  f => { f.feedback.pull_request_url += "0"; },
+  f => { f.feedback.commit_id = "b".repeat(40); },
+]) test("closed PR still rejects invalid identity/provenance", async () => {
+  const f = fixture();
+  f.pr.state = "closed";
+  change(f);
+  await assert.rejects(resolve(f));
+});
 
 for (const permission of ["write", "maintain", "admin", "read", "none", "unknown"]) {
   test(`main rechecks original feedback author ${permission} permission, never the forwarding bot`, async () => {
