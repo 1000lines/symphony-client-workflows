@@ -38,9 +38,7 @@ async function update(
   status,
   conclusion,
   summary,
-  reviewUrl,
-  assessment,
-  measurements
+  reviewUrl
 ) {
   return github.rest.checks.update({
     owner: request.owner,
@@ -58,7 +56,6 @@ async function update(
       title: conclusion
         ? `Cadence review: ${conclusion}`
         : "Cadence is reviewing",
-      ...(assessment || measurements ? { text: JSON.stringify({ assessment, measurements }) } : {}),
       summary: `${summary}\n\n[Workflow run](${request.runUrl})${
         reviewUrl ? ` · [Review](${reviewUrl})` : ""
       }\n\nAdvisory only; humans decide whether to merge.`,
@@ -134,7 +131,7 @@ export async function finishCheck(
   github,
   request,
   appId,
-  { result, ranReview, baseline, reviewer, readyGraphql, assessment, measurements } = {}
+  { result, ranReview, baseline, reviewer, readyGraphql } = {}
 ) {
   const checks = await checksForRequest(github, request, appId);
   const check = checks.find((item) => item.external_id === request.externalId);
@@ -168,25 +165,24 @@ export async function finishCheck(
       pull_number: number,
       per_page: 100,
     });
-    if (validAssessment(assessment, request)) {
-      conclusion = assessment.disposition === "APPROVE" ? "success" : "action_required";
-      summary = conclusion === "success"
-        ? "Cadence found no outstanding findings. Ready for human review."
-        : "Cadence found items needing attention. Read the editable Cadence comment.";
-      // The timeline still needs an APPROVE record. Narrative belongs only in
-      // the editable comment; non-approval never submits a formal review.
-      if (conclusion === "success") {
-        review = reviews.find(item => item.id > baseline && item.commit_id === request.head &&
-          item.user?.login === reviewer && item.state === "APPROVED" && !item.body);
-        if (!review) {
-          const { data } = await github.rest.pulls.createReview({ owner, repo, pull_number: number,
-            commit_id: request.head, event: "APPROVE" });
-          if (data.commit_id !== request.head || data.user?.login !== reviewer || data.state !== "APPROVED" || data.body)
-            throw new Error("Minimal approval readback did not match the Cadence App/head");
-          review = data;
-        }
-      }
-    } else summary = "No verified assessment for this accepted request/head was produced.";
+    review = reviews
+      .filter(
+        (item) =>
+          item.id > baseline &&
+          item.commit_id === request.head &&
+          item.user?.login === reviewer &&
+          ["APPROVED", "COMMENTED"].includes(item.state)
+      )
+      .sort((a, b) => b.id - a.id)[0];
+    if (review) {
+      conclusion = review.state === "APPROVED" ? "success" : "action_required";
+      summary =
+        conclusion === "success"
+          ? "Cadence found no outstanding findings. Ready for human review."
+          : "Cadence found items needing attention. Read the linked review.";
+    } else
+      summary =
+        "No new Cadence verdict for this accepted head was published. An older same-head review cannot satisfy this request.";
   } else if (result === "success" && ranReview !== "true") {
     conclusion = "action_required";
     summary =
@@ -247,9 +243,7 @@ export async function finishCheck(
     "completed",
     conclusion,
     summary,
-    assessment?.workpadUrl,
-    validAssessment(assessment, request) ? assessment : undefined,
-    measurements
+    review?.html_url
   );
   return { conclusion, summary, handoffError };
 }
@@ -284,46 +278,4 @@ export async function recoverCheck(github, context, request, appId, run) {
       `Workflow ended (${run.conclusion}) before final review publication. No clean verdict is claimed.`
     );
   }
-}
-
-// The existing incremental workpad payload is the provider handoff. Bind it to
-// this native run only after successful execution and a current-head read.
-export function assessmentFromUpdate(update, request) {
-  const open = item => !["resolved", "closed", "dismissed"].includes(item.status);
-  if (!update || update.lastReviewedSha !== request.head ||
-      !["APPROVE", "COMMENT"].includes(update.disposition) ||
-      typeof update.githubAssessmentSummary !== "string" || !update.githubAssessmentSummary.trim() ||
-      update.githubAssessmentSummary.length > 1400 || !Array.isArray(update.findings) ||
-      update.findings.some(item => !item || !item.id || !item.class || !item.status || !item.summary))
-    throw new Error("Missing or invalid current-head reviewUpdate assessment/findings");
-  const blocking = update.findings.filter(item => open(item) &&
-    (item.mandatory === true || ["blocker", "human-needed"].includes(item.class)));
-  if (update.disposition === "APPROVE" && blocking.length)
-    throw new Error("Approval has unresolved mandatory findings");
-  return { requestId: request.externalId, headSha: request.head, disposition: update.disposition,
-    githubAssessmentSummary: update.githubAssessmentSummary,
-    humanNeeded: blocking.some(item => item.class === "human-needed") };
-}
-
-export function validAssessment(assessment, request) {
-  return assessment?.requestId === request.externalId && assessment.headSha === request.head &&
-    ["APPROVE", "COMMENT"].includes(assessment.disposition) &&
-    typeof assessment.githubAssessmentSummary === "string" && Boolean(assessment.githubAssessmentSummary.trim()) &&
-    typeof assessment.humanNeeded === "boolean";
-}
-
-// Recovery and handoff read the App's persisted result, never review prose or
-// an event marker. Newer accepted work, including same-head retries, wins.
-export async function readCheckAssessment(github, request, appId) {
-  const checks = await checksForRequest(github, request, appId);
-  const check = checks.find(item => item.external_id === request.externalId);
-  if (!check || check.app?.id !== Number(appId) || check.head_sha !== request.head ||
-      check.status !== "completed" || !["success", "action_required"].includes(check.conclusion) ||
-      checks.some(item => item.id > check.id && item.external_id?.endsWith(`:${request.number}`))) return;
-  const { assessment, measurements } = JSON.parse(check.output?.text || "{}");
-  if (!validAssessment(assessment, request) ||
-      (check.conclusion === "success") !== (assessment.disposition === "APPROVE")) return;
-  const { data: pr } = await github.rest.pulls.get({ owner: request.owner, repo: request.repo, pull_number: request.number });
-  if (pr.state !== "open" || pr.head.sha !== request.head) return;
-  return { check, assessment, measurements, pr };
 }

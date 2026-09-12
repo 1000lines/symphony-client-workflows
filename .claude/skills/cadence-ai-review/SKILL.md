@@ -1,6 +1,6 @@
 ---
 name: cadence-ai-review
-description: Review a group of opt-in Symphony PRs against their Linear acceptance criteria and linked design docs. Fan out review axes per PR plus cross-PR coverage and seam checks, write detailed review state to one Linear Cadence workpad, then return the incremental workpad assessment for the workflow-owned editable PR comment.
+description: Review a group of opt-in Symphony PRs against their Linear acceptance criteria and linked design docs. Fan out review axes per PR plus cross-PR coverage and seam checks, write detailed review state to one Linear Cadence workpad, then post one concise GitHub PR review per PR (APPROVE when clean, else COMMENT; never REQUEST_CHANGES).
 ---
 
 # Cadence AI Review
@@ -15,7 +15,7 @@ regression, not ordinary edits alone. Human acceptance owns Done. See the
 
 Use this skill to review a group of opt-in Symphony PRs before human review. The
 review reads evidence, records detailed state in the Linear `## Cadence Workpad`,
-and returns an incremental workpad assessment: APPROVE when the PR has no
+and posts one concise GitHub PR review per PR — APPROVE when the PR has no
 blocker or human-needed findings, otherwise COMMENT. It never submits the formal
 GitHub `REQUEST_CHANGES` event, edits application code, or mutates arbitrary
 Linear issue state. The Linear workpad may still record a request-changes
@@ -26,10 +26,10 @@ requirements. A single PR is a group of one.
 
 ## Boundaries
 
-- Return the existing incremental `reviewUpdate` JSON to the file named by the
-  workflow. Do not submit GitHub reviews, inline comments or conversation
-  comments. The workflow persists the workpad and edits one App-owned comment;
-  clean approval additionally creates a bodyless APPROVE record.
+- Post output as a GitHub **PR review** (not a plain conversation comment) so the
+  event surface is always `pull_request_review`. Use the `APPROVE` event when the
+  PR has no `blocker` and no `human-needed` findings; otherwise use the `COMMENT`
+  event. Never use `REQUEST_CHANGES`.
 - Treat Cadence as an advisory reviewer, not a hard merge gate. The skill emits
   review assessments and workpad state, not repository protection or Linear
   workflow outcomes.
@@ -44,7 +44,7 @@ requirements. A single PR is a group of one.
   tokens, API keys, customer data, or other secrets in any comment.
 - Do not post raw per-axis dumps, full requirement matrices, run state, skipped
   event detail, or AI-to-AI scratchpad detail to the PR. Put that detail in the
-  Cadence workpad payload and return the concise assessment for publication.
+  Cadence workpad and post only the concise assessment to GitHub.
 
 ## Sources Of Truth And Judgment
 
@@ -62,7 +62,7 @@ with skill and judgment — not to defer to any single source.
   Review against that revised intent. AI disagreement alone is not a blocker
   or a `human-needed` finding. Still identify concrete defects in the resulting
   implementation; do not confuse those with a preference for the old design.
-  Keep material technical objections concise in the editable PR assessment so they remain
+  Keep material technical objections concise in the PR review so they remain
   findable with the merged change; Symphony includes accepted tradeoffs in the
   PR body. Recording disagreement does not require another approval round.
 - AI-authored artifacts are peers, not authorities. The `plan` PR and the code
@@ -144,7 +144,7 @@ guess its contents.
 - **Record workpad** — write the detailed state to the associated Linear issue's
   `## Cadence Workpad` through the helper. See
   [`references/linear.md`](./references/linear.md).
-- **Return** — incremental workpad JSON for workflow publication. See Output.
+- **Post** — GitHub PR reviews only. See Output.
 
 ## Fan-out
 
@@ -158,8 +158,8 @@ guess its contents.
   not over a single PR's internals.
 - A reviewer may raise an adjacent concern only when it is evidence-backed and
   not a duplicate of another axis.
-- Workers return findings and the assessment. The workflow alone publishes
-  after identity preflight (see Output).
+- Workers produce findings and the review body; they do not post. The
+  orchestrator posts after the identity preflight (see Output).
 
 ## Finding IDs
 
@@ -184,7 +184,7 @@ Record the current overall disposition in the Linear workpad. For open mandatory
 follow-up, prefer an explicit workpad disposition such as `request changes` or
 `human-needed` so Symphony can tell what action remains. This is a Linear-side
 review opinion; it does not change the GitHub event rule above, and Cadence must
-return disposition `COMMENT`; it must not submit a formal review.
+still submit a `COMMENT` review rather than `REQUEST_CHANGES`.
 
 Treat `blocker` and `human-needed` findings as mandatory follow-up. Treat
 `should-fix` and `suggestion` findings as non-blocking Cadence notes unless a
@@ -198,29 +198,25 @@ Cadence has two output surfaces with different audiences:
 
 - **Linear `## Cadence Workpad`** — detailed review state for Symphony and future
   Cadence runs.
-- **Editable GitHub PR comment** — the only human-facing assessment, with status,
-  verdict, findings and measured footer. The workflow owns all publication.
+- **GitHub PR review** — concise human-readable assessment for PR reviewers.
 
-Write the existing incremental payload to the workflow's specified result file.
-`reviewUpdate` must contain `lastReviewedSha`, `disposition` (`APPROVE` or
-`COMMENT`), `summary`, `githubAssessmentSummary` (at most 1400 characters),
-`requirements`, `humanFeedback`, and `findings` with stable IDs, class, status and
-summary. Carry unresolved findings forward. `APPROVE` requires no open mandatory,
-blocker or human-needed findings. Put the concise assessment and at most three
-key findings in `githubAssessmentSummary`; retain full detail in the workpad.
-Do not estimate model, duration or tokens; the workflow collects measurements.
+Write and read back the workpad before publishing. If the helper or credentials are missing,
+do not bypass it with a separate Linear writer; abort before posting and report
+the configuration failure.
 
-The workflow validates the current head and selected provider's success, writes
-and reads back the workpad, persists the assessment on the existing App check,
-and edits the stable comment. It calls the existing Linear/human handoff directly.
-A bodyless APPROVE record preserves the existing approval timeline; COMMENT
-records and narrative reviews are no longer published. Historical reviews remain.
-Missing results, failed persistence and stale heads cannot produce clean approval.
+For each PR, submit exactly one GitHub PR review, choosing the event by the PR's
+findings:
+
+- `APPROVE` when the PR has no `blocker` and no `human-needed` findings. Approve
+  even when only `should-fix` or `suggestion` findings remain; include them in
+  the review body as non-blocking notes.
+- `COMMENT` otherwise.
+- Never `REQUEST_CHANGES`.
 
 ### Linear Workpad Detail
 
-For each linked Linear issue, prepare the payload for the workflow to update
-one `## Cadence Workpad` through `scripts/cadence-linear-workpad.mjs`. Use the incremental
+For each linked Linear issue, write or update one `## Cadence Workpad` comment
+through `scripts/cadence-linear-workpad.mjs`. Prefer the incremental
 `reviewUpdate` input shape documented in
 `docs/engineering/review/cadence-linear-workpad.md`: each workpad write is an
 increment on the prior persisted review object, not a free-form replacement.
@@ -244,7 +240,7 @@ that should not live on the PR:
 
 ### GitHub-Visible Assessment Format
 
-Keep `githubAssessmentSummary` short and useful to a human reviewer. Do not include the
+Keep the PR review body short and useful to a human reviewer. Do not include the
 full coverage table or raw scratchpad detail.
 
 Use these shapes:
@@ -293,20 +289,33 @@ Non-blocking notes:
 
 For group reviews, put the detailed requirement coverage table (`REQ` → owning
 PR(s) → `covered`/`partial`/`unassigned`) in the Cadence workpad. The
-GitHub-visible comment may summarize coverage in one or two sentences only when
+GitHub-visible review may summarize coverage in one or two sentences only when
 it helps the human reviewer understand the assessment.
 
-Include file/line references in the assessment or detailed workpad findings;
-never publish inline comments or additional review messages. Do not expose
-secrets or private paths.
+Use inline review comments only for line-specific findings where the exact line
+location helps a human reviewer act. Otherwise prefer the concise review body
+and keep detail in the workpad.
 
-### Identity and publication
+Do not expose secrets or private paths in any review.
 
-The trusted workflow verifies its minted installation token is scoped to the
-caller repository and derives the expected App login from its minted slug.
-Providers return data; the workflow alone persists and publishes it. Never
-switch to a saved GitHub login or another credential. Missing App identity,
-installation access or Linear credentials fails publication.
+### Identity preflight and posting from the orchestrator
+
+In a fan-out, the per-PR and cross-PR workers **return their review body**; they
+do not post. The orchestrator submits every review, and before its first post it
+**verifies identity** using the trusted workflow's `CADENCE_REVIEWER_LOGIN`,
+which is derived from `actions/create-github-app-token`'s `app-slug` output and
+ends in `[bot]`. The workflow verifies that its minted installation token is
+scoped to the target repository before starting the reviewer. Use only its
+provided `GH_TOKEN` for publication; never switch to a saved `gh` login or user
+PAT. Confirm `gh api installation/repositories` includes exactly the target
+repository and the expected App login is present. Installation tokens do not
+support the user-token identity check `gh api user`.
+
+If the expected App identity, installation access or Linear credentials are
+missing, **do not post**; abort and report a configuration failure. After posting,
+read back the review author and current-head SHA and confirm they match the
+trusted App login and reviewed PR head. Posting from one verified context keeps
+fan-out workers from depending on an inherited environment they may not have.
 
 ## Re-review And Idempotency
 

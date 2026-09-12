@@ -39,14 +39,17 @@ a clean branch and a ready PR.
    prior/pending rerun state, human feedback, requirement updates, finding
    updates, learn-from-human items, and AI-to-AI coordination.
 
-3. Write this JSON to the result-file path named in the workflow prompt. Include
-   `reviewUpdate.githubAssessmentSummary`, `lastReviewedSha`, `disposition`,
-   `findings`, `requirements` and `humanFeedback`. Carry open findings forward.
+3. Write the workpad through the helper:
 
-4. The workflow validates and persists the payload through the workpad helper,
-   reads it back, and publishes the editable App comment. Providers must not
-   publish formal reviews or additional comments. Only a bodyless APPROVE record
-   remains for clean verdicts; completion/recovery directly owns handoff.
+   ```sh
+   node scripts/cadence-linear-workpad.mjs DEMO-114 workpad.json
+   ```
+
+   Use `-` instead of a file path to read JSON from stdin.
+
+4. Read back the saved head and review state, then post Cadence's
+   concise GitHub PR review assessment. The GitHub body should not
+   duplicate the full workpad detail.
 
 If the helper or Linear credentials fail, do not bypass this by writing the
 Cadence workpad through another path. Report the configuration failure so the

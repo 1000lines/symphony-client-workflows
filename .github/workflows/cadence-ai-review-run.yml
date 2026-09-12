@@ -37,8 +37,6 @@ on:
         value: ${{ jobs.review.outputs.ran_review }}
       baseline:
         value: ${{ jobs.start.outputs.baseline }}
-      assessment:
-        value: ${{ jobs.review.outputs.assessment }}
       measurements:
         value: ${{ jobs.review.outputs.measurements }}
 
@@ -109,7 +107,6 @@ jobs:
     outputs:
       ran_review: ${{ steps.plan.outputs.run_claude }}
       measurements: ${{ steps.measured.outputs.measurements }}
-      assessment: ${{ steps.verified.outputs.assessment }}
     steps:
       - name: Validate PR number
         env:
@@ -624,25 +621,16 @@ jobs:
             repository in GH_REPO using gh API/PR reads, including its instructions
             and changed source. Do not execute PR-controlled code.
 
-            Review PR #${{ inputs.pr_number || github.event.pull_request.number }}.
-            Write the existing incremental workpad JSON to
-            ${{ runner.temp }}/cadence-review-update.json with reviewUpdate containing
-            lastReviewedSha, disposition (APPROVE or COMMENT), summary,
-            githubAssessmentSummary (the complete concise human assessment, at most
-            1400 characters), requirements, findings and humanFeedback. Include all
-            open/carried findings with stable IDs, class, status and summary.
-            APPROVE only with no open mandatory/blocker/human-needed findings.
-            The workflow persists this payload to Linear and publishes the one
-            editable App comment. Do not publish GitHub reviews, inline comments,
-            conversation comments or the completed Linear update yourself.
+            Review PR #${{ inputs.pr_number || github.event.pull_request.number }} and post one GitHub PR review:
+            APPROVE when the PR has no blocker and no human-needed findings,
+            otherwise COMMENT.
 
             Fast review: use one focused pass, without subagents or cross-PR fan-out.
             This overrides the skill's exhaustive axis and coverage-matrix requirements.
             Prioritize new human feedback, changed code, open findings and concrete
             correctness/security risks. Reuse prior evidence for unchanged areas.
             Keep the workpad concise; preserve source acquisition, authority checks,
-            current-head verification and the workpad schema. These output instructions
-            supersede older skill publication instructions.
+            current-head verification and the existing verdict/publication rules.
 
             Trigger source: ${{ inputs.trigger_source || format('{0}.{1}', github.event_name, github.event.action) }}
             Trigger actor: ${{ inputs.trigger_actor || github.actor }}
@@ -653,12 +641,12 @@ jobs:
             Do not use .claude/skills/design-review/SKILL.md for process requirements or design review.
 
             Read Linear and design docs as needed. Keep detailed review state in
-            the incremental workpad payload. Never submit a GitHub review.
+            the Cadence Linear Workpad. Never submit a REQUEST_CHANGES review.
           claude_args: |
             --model ${{ env.CADENCE_CLAUDE_MODEL }}
             --max-turns 60
             --allowedTools Bash,Read,Glob,Grep,Task,Write,WebFetch
-            --append-system-prompt "Review the current head with cadence-ai-review. Write the incremental reviewUpdate JSON to ${{ runner.temp }}/cadence-review-update.json. The workflow owns Linear persistence and all GitHub publication. Do not submit reviews or comments."
+            --append-system-prompt "Post one GitHub PR review for PR #${{ inputs.pr_number || github.event.pull_request.number }} at current head ${{ steps.plan.outputs.head_sha }} using .claude/skills/cadence-ai-review/SKILL.md plus the standing-docs current-state axis when applicable. Do not use .claude/skills/design-review/SKILL.md for process requirements or design review. APPROVE when the PR has no blocker and no human-needed findings, otherwise COMMENT. Never run 'gh pr review --request-changes' and never call the reviews API with a REQUEST_CHANGES event."
         env:
           CLAUDE_CODE_EFFORT_LEVEL: low
           CADENCE_CLAUDE_MODEL: ${{ vars.CADENCE_CLAUDE_MODEL }}
@@ -705,25 +693,18 @@ jobs:
             core.setOutput('measurements', JSON.stringify(reviewMeasurements({ execution,
               requestedModel: process.env.REQUESTED_MODEL, startedAt: process.env.STARTED_AT, finishedAt })));
 
-      - name: Verify assessment and persist the existing workpad
-        id: verified
+      - name: Verify review outcomes (no false-green; block request-changes)
         if: always() && steps.plan.outputs.run_claude == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
-          CHECK_REQUEST: ${{ inputs.request }}
-          ISSUE_IDENTIFIER: ${{ steps.pr.outputs.issue_identifier }}
-          LINEAR_API_TOKEN: ${{ secrets.CADENCE_LINEAR_API_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
           CADENCE_REVIEW_OUTCOME: ${{ inputs.provider == 'codex' && steps.codex_review.outcome || steps.cadence_review.outcome }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const verifyCadenceAiReview = require("./.github/workflows/scripts/verify-cadence-ai-review.cjs");
 
-            const fs = require('node:fs');
-            await verifyCadenceAiReview({ github, context, core, reviewer: process.env.CADENCE_REVIEWER_LOGIN,
-              reviewOutcome: process.env.CADENCE_REVIEW_OUTCOME, request: JSON.parse(process.env.CHECK_REQUEST),
-              workpad: JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/cadence-review-update.json`, 'utf8')),
-              issueIdentifier: process.env.ISSUE_IDENTIFIER, token: process.env.LINEAR_API_TOKEN });
+            await verifyCadenceAiReview({ github, context, core, reviewer: process.env.CADENCE_REVIEWER_LOGIN, reviewOutcome: process.env.CADENCE_REVIEW_OUTCOME });
 
       - name: Fail if stale Cadence approval could not be dismissed or re-requested
         if: always() && steps.plan.outputs.run_claude == 'true' && steps.review_state.outputs.stale_approval == 'true' && steps.stale_approvals.outputs.failed_count != '0'

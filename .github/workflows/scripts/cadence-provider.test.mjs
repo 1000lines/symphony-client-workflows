@@ -73,8 +73,8 @@ test('providers share the review task, minted publishing identity and Linear wor
     assert.match(action.uses, /@[a-f0-9]{40}$/);
     assert.equal(action.env.GH_TOKEN, '${{ steps.app-token.outputs.token }}');
     assert.equal(action.env.LINEAR_API_TOKEN, '${{ secrets.CADENCE_LINEAR_API_TOKEN }}');
-    assert.match(action.with.prompt, /Do not publish GitHub reviews/);
-    assert.match(action.with.prompt, /incremental workpad payload/);
+    assert.match(action.with.prompt, /post one GitHub PR review/);
+    assert.match(action.with.prompt, /Cadence Linear Workpad/);
     assert.match(action.with.prompt, /Current PR head SHA:/);
     assert.match(action.with.prompt, /Do not execute PR-controlled code/);
   }
@@ -95,7 +95,7 @@ test('selected-provider failures cannot use the skipped provider or an older suc
   const previous = process.env.PR_NUMBER;
   process.env.PR_NUMBER = '42';
   t.after(() => previous === undefined ? delete process.env.PR_NUMBER : process.env.PR_NUMBER = previous);
-  const outcome = steps.find(step => step.id === 'verified');
+  const outcome = steps.find(step => step.name.startsWith('Verify review outcomes'));
   const expression = outcome.env.CADENCE_REVIEW_OUTCOME.slice(3, -2);
   for (const provider of ['codex', 'claude']) {
     for (const result of ['success', 'failure', 'cancelled', 'skipped']) {
@@ -106,12 +106,16 @@ test('selected-provider failures cannot use the skipped provider or an older suc
       const actual = new Function('steps', 'inputs', `return ${expression}`)(evaluations, { provider });
       assert.equal(actual, result);
       assert.equal(selected(provider).length, 1);
-      // Old approval records cannot satisfy a missing result, even when the
-      // selected provider step succeeds. Full persistence paths are tested below.
-      await assert.rejects(verify({ reviewOutcome: actual, reviewer: 'cadence[bot]',
-        context: { repo: { owner: 'client', repo: 'adopter' } },
-        github: { paginate: async () => [{ state: 'APPROVED' }] },
-      }), /Action outcome|current-head reviewUpdate/);
+      const errors = [];
+      await verify({
+        reviewOutcome: actual, reviewer: 'cadence[bot]',
+        context: { repo: { owner: 'client', repo: 'adopter' } }, core: { setFailed: value => errors.push(value) },
+        github: {
+          rest: { pulls: { get: async () => ({ data: { head: { sha: 'current' } } }), listReviews: 'reviews' } },
+          paginate: async () => [{ user: { login: 'cadence[bot]' }, state: 'APPROVED', commit_id: 'current' }],
+        },
+      });
+      assert.equal(errors.length, result === 'success' ? 0 : 1);
     }
   }
 });
@@ -141,39 +145,3 @@ test('every reusable boundary declares and forwards only named secrets; ingress 
   }
   assert.doesNotMatch(JSON.stringify(read('cadence-review-ingress')), /secrets|environment|checkout@/);
 });
-
-for (const provider of ['codex', 'claude']) {
-  test(`${provider}: complete incremental result persists/readbacks before publication; missing inputs and denied writes fail`, async () => {
-    const head = 'a'.repeat(40);
-    const request = { owner: 'client', repo: 'adopter', number: 42, head, externalId: 'cadence:10:1:42' };
-    for (const disposition of ['APPROVE', 'COMMENT']) {
-      let body;
-      let deny = false;
-      const fetchImpl = async (_url, options) => {
-        const input = JSON.parse(options.body);
-        const data = input.query.includes('CadenceWorkpadIssue')
-          ? { issue: { id: 'issue', identifier: '100-99', comments: { nodes: body ? [{ id: 'pad', body }] : [], pageInfo: { hasNextPage: false } } } }
-          : (body = input.variables.body, { [input.query.includes('commentCreate') ? 'commentCreate' : 'commentUpdate']: {
-              success: !deny, comment: { id: 'pad', url: 'https://linear.app/1000lines/issue/100-99#comment-pad' } } });
-        return { ok: true, json: async () => ({ data }) };
-      };
-      const workpad = { reviewUpdate: { lastReviewedSha: head, disposition,
-        summary: 'Reviewed retry behavior', githubAssessmentSummary: 'Assessment: ' + disposition,
-        findings: disposition === 'APPROVE' ? [] : [{ id: 'F1', class: 'blocker', status: 'open', summary: 'Fix retry' }],
-      } };
-      const input = { request, workpad, issueIdentifier: '100-99', token: 'fixture', fetchImpl,
-        reviewer: 'cadence[bot]', reviewOutcome: 'success', context: { repo: { owner: 'client', repo: 'adopter' } },
-        github: { rest: { pulls: { get: async () => ({ data: { state: 'open', head: { sha: head } } }) } } },
-        core: { setOutput: (key, value) => { assert.equal(key, 'assessment'); assert.match(body, /cadence:10:1:42/); assert.equal(JSON.parse(value).disposition, disposition); } },
-      };
-      const result = await verify(input);
-      assert.equal(result.requestId, request.externalId);
-      assert.match(result.workpadUrl, /comment-pad$/);
-      deny = true;
-      await assert.rejects(verify(input), /did not update/);
-      await assert.rejects(verify({ ...input, reviewOutcome: 'failure' }), /Action outcome/);
-      await assert.rejects(verify({ ...input, workpad: { reviewUpdate: { ...workpad.reviewUpdate, lastReviewedSha: 'b'.repeat(40) } } }), /current-head/);
-      await assert.rejects(verify({ ...input, workpad: { reviewUpdate: { ...workpad.reviewUpdate, disposition: 'APPROVE', findings: [{ id: 'F1', class: 'blocker', status: 'open', summary: 'Fix' }] } } }), /unresolved mandatory/);
-    }
-  });
-}

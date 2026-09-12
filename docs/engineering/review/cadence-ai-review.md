@@ -11,10 +11,9 @@ ordinary human PR review and from the general review-agent methodology.
 The review logic lives in the `cadence-ai-review` skill
 (`.claude/skills/cadence-ai-review/`). The GitHub workflows provision
 credentials and run Codex or Claude against that skill. Cadence writes detailed
-review state to one Linear comment headed `## Cadence Workpad`, then edits one
-App-owned PR comment per PR. It contains status, verdict, concise findings and
-measured footer. A clean pass also emits a bodyless APPROVE record for approval
-tracking; no COMMENT or narrative formal reviews are published.
+review state to one Linear comment headed `## Cadence Workpad`, then posts one
+concise GitHub PR review per completed pass (`APPROVE` when clean, otherwise `COMMENT`;
+never `REQUEST_CHANGES`).
 
 ## Acceptance contract
 
@@ -83,7 +82,7 @@ the terminal `Done` transition.
 | --------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `HumanDefinesWork`          | Human                     | Defines the Linear issue, scope, acceptance criteria, and reviewer expectations.                                                                     |
 | `SymphonyImplements`        | Symphony                  | Branches from the selected base, implements the issue, records evidence in `## Codex Workpad`, opens or updates the PR, and asks Cadence for review. |
-| `CadenceReviewsCurrentHead` | Cadence                   | Reviews the current PR head, writes durable state to `## Cadence Workpad`, and updates one editable PR comment from the verified assessment.         |
+| `CadenceReviewsCurrentHead` | Cadence                   | Reviews the current PR head, writes durable state to `## Cadence Workpad`, and posts a concise `APPROVE` or `COMMENT` PR review.                     |
 | `SymphonyReworks`           | Symphony                  | Handles actionable Cadence or human feedback, pushes the smallest appropriate fix, and sends the updated head back through Cadence.                  |
 | Missing input               | Human or agent            | Supplies a missing decision, credential, source, or environment detail before Symphony can continue.                                                 |
 | Human review                | Human                     | Uses the PR, Cadence review, and workpads to decide merge readiness. A comment without approval is de facto a request for more work.                 |
@@ -102,14 +101,16 @@ rather than through hidden Symphony or Cadence-only decisions:
 - A `pull_request_target.review_requested` event whose requested reviewer is
   `example-cadence-bot` invokes the single-PR Cadence review workflow. Review
   requests for other reviewers do not invoke Cadence.
-- Native review completion persists the verified assessment on the App-owned
-  advisory check and edits the existing App comment. Clean approval keeps a
-  bodyless APPROVE record for the timeline; no narrative review is submitted.
-- Completion and recovery invoke the existing handoff helper directly from the
-  persisted check. Actionable non-approval wakes Linear Active; approval or
-  human-needed findings request eligible PR assignees. Current-head, App,
-  accepted-run, terminal-state and workpad guards still apply. Minimal approval
-  events are ignored by the event bridge to avoid a duplicate handoff.
+- Cadence posts an `APPROVE` PR review when the current head has no blocker or
+  human-needed findings. The Cadence review-submitted workflow then requests
+  human review from the PR assignee. If no eligible PR assignee exists, it
+  records a visible routing gap instead of requesting a broad human team.
+- Cadence posts a `COMMENT` PR review when the current head has actionable
+  findings or needs human input. The `cadence-linear-rework.yml` workflow moves
+  the linked Linear issue to `Active` for actionable findings and requests
+  eligible human PR assignees for human-needed findings. A human-review request
+  leaves Linear state unchanged; Symphony records missing decisions in its
+  workpad and waits in `Inactive`.
 - Human non-approved review summaries with content, `CHANGES_REQUESTED`
   reviews, and nonempty top-level PR comments also wake the linked issue
   directly. Human `APPROVED` reviews do not directly wake Linear, but still
@@ -142,7 +143,7 @@ keep the protected environment for admission, without shadowing those secrets.
 GitHub's repository/PR concurrency group keeps one active review and one pending
 review (`queue: single`). New arrivals replace intermediate pending jobs without
 cancelling the running review. The surviving job reacquires the current PR and
-all changes/feedback since the last completed Cadence assessment; it must not review only
+all changes/feedback since the last posted Cadence review; it must not review only
 its triggering event. Feedback stays in GitHub even when its queued job is cancelled.
 Short admission/publication and Linear handoff queues retain every event.
 Closing or merging a PR cancels that group. Review planning also checks that the
@@ -155,8 +156,8 @@ current state; its outcome verifier rejects missing or stale-head reviews.
 Cadence keeps one App-owned PR conversation comment, identified by
 `<!-- cadence-status -->` and the minted App identity. It shows queued,
 reviewing, approved/needs-attention, or failed/cancelled status, a short assessment
-with up to three findings, and links to the reviewed head, run and Linear workpad.
-The structured Linear workpad retains detailed review history and
+with all findings, and links to the reviewed head, run and formal review.
+The formal review and structured Linear workpad keep their existing roles and
 history; this comment is presentation, not verdict authority.
 
 Admission, review start, completion and recovery share the existing short per-PR
@@ -440,36 +441,43 @@ Cadence has two output surfaces with different audiences:
 - **Linear `## Cadence Workpad`**: detailed review state for Symphony and future
   Cadence runs, written through the
   [Cadence Linear Workpad](./cadence-linear-workpad.md) helper.
-- **Editable GitHub PR comment**: the only human-facing review assessment.
+- **GitHub PR review**: concise human-readable assessment for PR reviewers.
 
-Both Codex and Claude return the existing incremental `reviewUpdate` payload,
-including the current head, disposition, concise `githubAssessmentSummary` and
-structured findings/requirements/human feedback. The workflow verifies provider
-success and current head, persists the existing workpad and reads it back before
-passing the assessment to completion. Missing results or workpad write/readback
-failures fail closed. This path does not use the separate generation-controller
-redesign.
+The Linear workpad owns run status, trigger source, review decision, head SHA,
+last-reviewed SHA and timestamp, prior or pending rerun state, skipped or
+ignored events, requirement coverage, detailed findings, human-feedback learning
+notes, and AI-to-AI coordination.
 
-Completion retains the concise assessment and measured footer in the existing
-App check's output, then edits the stable App comment. Recovery uses that same
-check data if comment publication or handoff failed. It never fetches review
-prose from `details_url`. The existing publication lock, App authorship checks,
-newer-request and changed-head guards protect comment updates.
+Symphony treats the Linear workpad as Cadence's durable handoff. Before
+performing Cadence-driven rework, deciding that no Cadence action remains, or
+summarizing review state for a human, Symphony should read the current
+`## Cadence Workpad` instead of reconstructing Cadence state from GitHub review
+text alone.
 
-Clean results publish only a bodyless APPROVE record for existing approval
-tracking. Non-approval publishes no formal review. Completed App checks supply
-the same-head non-approval timeline anchor for subsequent review planning; prior
-heads without an approval baseline safely receive a full review. Historical
-reviews remain. Detailed history and findings stay in the one Linear workpad;
-Symphony reads it before rework or readiness decisions.
+The GitHub review owns the concise assessment for the reviewed head, with the
+reviewed SHA and workpad link. Each completed pass explains why the PR is
+acceptable, blocked, or needs human input. Earlier reviews remain in GitHub
+history; the single Linear workpad is updated in place.
+Line-specific findings may use inline review comments when the exact location
+helps a human reviewer act. Raw coverage tables, skipped-event detail, and
+scratchpad reasoning stay on Linear.
 
-The native finish/recovery job calls the existing Linear/human handoff helper.
-Its confirmed mutation or skip is recorded in the existing workpad, keyed by the
-check ID for retry deduplication. Failed routing remains retryable. Cleanup now
-requires the same explicitly forwarded `CADENCE_LINEAR_API_TOKEN`; no new secret
-or App grant is introduced. The caller must forward that existing secret.
+The review event is chosen by findings: `APPROVE` when the PR has no `blocker`
+and no `human-needed` findings, otherwise `COMMENT`. `REQUEST_CHANGES` is never
+used. Posting output as PR reviews (not plain conversation comments) keeps the
+event surface `pull_request_review`.
 
-The App check and approval remain advisory. Human acceptance owns merge and Done.
+Cadence's App approval is advisory; the project still requires human acceptance
+before merge. It does not authorize automatic merge or replace required CI.
+
+Reviews are submitted from one verified context. The trusted workflow verifies
+its installation token is scoped to the target and derives the expected bot
+login from the token Action's App slug. In a fan-out, workers return review bodies
+and the orchestrator publishes using that token. Installation tokens use
+`GET /installation/repositories` for access preflight, not the user-token-only
+`GET /user` endpoint. Missing identity or access aborts publication. The outcome
+verifier accepts only `APPROVED` or `COMMENTED` reviews from that App at the
+current head; advisory publication also requires a new verdict after admission.
 
 ## Human Review And Follow-Up Routing
 
@@ -546,10 +554,13 @@ that live evidence.
 
 ## Request-Changes Enforcement
 
-Providers return assessment data and must not publish reviews. The trusted
-completion helper submits only a bodyless APPROVE when the verified assessment
-is clean. Non-approval uses the editable comment and direct completion handoff.
-Historical reviews are preserved.
+Three layers keep `REQUEST_CHANGES` off:
+
+1. The skill restricts the event to `APPROVE` or `COMMENT`.
+2. The workflow appends a system prompt repeating that constraint.
+3. A post-run audit step (`Block request-changes reviews`) dismisses any
+   `CHANGES_REQUESTED` review authored by the bot on a target PR and fails the
+   job.
 
 ## Linear Write-Back
 
@@ -560,7 +571,7 @@ not edit `## Codex Workpad`.
 The `## Codex Workpad` remains Symphony-owned execution state. Cadence may read
 it during re-review to understand Symphony's latest reasoning and evidence, but
 any Cadence assessment, skipped-event detail, rerun state, or AI coordination
-must be written back to `## Cadence Workpad` or the editable GitHub PR assessment as
+must be written back to `## Cadence Workpad` or the concise GitHub PR review as
 described above.
 
 The Cadence review skill and event/trigger workflows do not change Linear issue
@@ -603,3 +614,24 @@ marker. A marker does not enable completion routing from a non-Symphony branch.
 
 Slack notifications are deferred. This workflow does not reference Slack secrets
 and does not send Slack messages.
+
+## Hide duplicate formal commentary
+
+Formal reviews remain the verdict and handoff records for both providers. Shared
+publication copies the full review assessment into the existing editable App
+comment, reads the comment back, and only then hides the matching current-head
+Cadence review with GraphQL `minimizeComment` and classifier `DUPLICATE`. It
+verifies `isMinimized=true` and `minimizedReason=duplicate` with a separate query.
+The original body, verdict, ID and evidence stay intact. Human and other App
+reviews, and the consolidated comment, are never hidden by this path.
+
+A failed copy/readback leaves the original visible. A denied or unconfirmed hide
+fails publication and remains retryable through the existing completion/cleanup
+flow; an already completed comment does not suppress the hide retry. Subsequent
+reviews update the same comment. Current-head and newer-request guards still
+apply. The native finish/recovery logs include the verified hide result.
+
+Adoption requires matched shared workflow/helper refs via Copier. Retain a live
+Cadence App run showing the original review ID/body/verdict, stable comment ID
+and hide readback. Interactive operator hiding does not prove the workflow App
+can minimize reviews. Do not switch credentials or expand permissions on failure.

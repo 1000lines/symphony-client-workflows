@@ -15,7 +15,6 @@ import {
   renderReviewHandoffEvidence,
   requestHumanReview,
   routeReviewHandoff,
-  routeCheckHandoff,
 } from "./cadence-linear-rework.mjs";
 
 const payload = ({ review = {}, pullRequest = {} } = {}) => ({
@@ -933,61 +932,3 @@ for (const eventName of ["pull_request_review", "issue_comment"]) {
     assert.equal(workpad.coordination.reviewHandoff.operation, "updated");
   });
 }
-
-
-test("completed App assessments route without review prose/events and retry the existing workpad handoff", async () => {
-  const head = "a".repeat(40);
-  const request = { owner: "example-org", repo: "example-repo", number: 3604, head,
-    externalId: "cadence:123:1:3604", runUrl };
-  for (const mode of ["actionable", "approve", "human", "terminal", "stale", "newer", "wrong-app", "failure", "late-push"]) {
-    const f = harness({ state: mode === "terminal" ? "Done" : "Inactive" });
-    const pr = payload().pull_request;
-    pr.head.sha = head;
-    const assessment = { requestId: request.externalId, headSha: head,
-      disposition: mode === "approve" ? "APPROVE" : "COMMENT", humanNeeded: mode === "human",
-      githubAssessmentSummary: "No routing keywords are needed here." };
-    const check = { id: 8, app: { id: mode === "wrong-app" ? 99 : 42 },
-      external_id: request.externalId, head_sha: head, status: "completed",
-      conclusion: mode === "failure" ? "failure" : mode === "approve" ? "success" : "action_required",
-      output: { text: JSON.stringify({ assessment }) } };
-    let reads = 0;
-    const github = {
-      rest: { checks: { listForRef: "checks" }, pulls: { get: async () => {
-        if (mode === "stale" || (mode === "late-push" && ++reads > 1)) pr.head.sha = "b".repeat(40);
-        return { data: pr };
-      } } },
-      paginate: async () => mode === "newer" ? [check, { ...check, id: 9 }] : [check],
-    };
-    const run = () => routeCheckHandoff({ github, request, app: { id: 42, slug: "cadence" },
-      token: "linear-token", githubToken: appToken, fetchImpl: f.fetchImpl });
-    const result = await run();
-    const mutations = f.requests.filter(r => r.query?.includes("issueUpdate"));
-    assert.equal(mutations.length, mode === "actionable" ? 1 : 0, mode);
-    const humanRequests = f.requests.filter(r => r.url.endsWith("requested_reviewers"));
-    assert.equal(humanRequests.length, ["approve", "human"].includes(mode) ? 1 : 0, mode);
-    if (["actionable", "approve", "human"].includes(mode)) {
-      assert.equal(result.checkId, 8);
-      assert.equal(parseCadenceWorkpad(f.comments[1].body).coordination.reviewHandoff.checkId, 8);
-      assert.equal((await run()).skippedReason, "check-already-routed");
-    }
-  }
-});
-
-test("a failed check handoff remains retryable; minimal approval events cannot duplicate it", async () => {
-  const decision = classifyCadenceLinearReworkEvent({ cadenceReviewerLogin: "cadence[bot]",
-    payload: payload({ review: { state: "approved", body: "", user: { login: "cadence[bot]" } } }) });
-  assert.equal(decision.shouldRequestHumanReview, false);
-  const f = harness({ failMutation: true });
-  const head = "a".repeat(40);
-  const pr = payload().pull_request;
-  pr.head.sha = head;
-  const request = { owner: "example-org", repo: "example-repo", number: 3604, head, externalId: "cadence:123:1:3604", runUrl };
-  const github = { rest: { checks: { listForRef: "checks" }, pulls: { get: async () => ({ data: pr }) } },
-    paginate: async () => [{ id: 8, app: { id: 42 }, external_id: request.externalId, head_sha: head,
-      status: "completed", conclusion: "action_required", output: { text: JSON.stringify({ assessment: {
-        requestId: request.externalId, headSha: head, disposition: "COMMENT", humanNeeded: false, githubAssessmentSummary: "Fix retry" } }) } }] };
-  const run = () => routeCheckHandoff({ github, request, app: { id: 42, slug: "cadence" }, token: "linear-token", githubToken: appToken, fetchImpl: f.fetchImpl });
-  assert.equal((await run()).operation, "failed");
-  assert.equal((await run()).operation, "failed");
-  assert.equal(f.requests.filter(r => r.query?.includes("issueUpdate")).length, 2);
-});

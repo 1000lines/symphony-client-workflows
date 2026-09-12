@@ -49,13 +49,6 @@ function fixture() {
       pulls: {
         get: async () => ({ data: structuredClone(pr) }),
         listReviews: "reviews",
-        createReview: async input => {
-          const review = { id: reviews.length + 1, state: "APPROVED", commit_id: input.commit_id, body: "", user: { login: "cadence" } };
-          assert.equal(input.event, "APPROVE");
-          assert.equal(input.body, undefined);
-          reviews.push(review);
-          return { data: review };
-        },
       },
     },
     paginate: async (endpoint, input) =>
@@ -91,8 +84,6 @@ function fixture() {
       baseline: 0,
       reviewer: "cadence",
       readyGraphql,
-      assessment: { requestId: req.externalId, headSha: req.head, disposition: "APPROVE", humanNeeded: false,
-        githubAssessmentSummary: "Assessment: Approve", workpadUrl: "https://linear.app/issue/100-99#comment-1" },
       ...options,
     });
   return { github, checks, reviews, pr, ready, verdict, finish };
@@ -115,7 +106,7 @@ test("admission is yellow on the actual PR head; duplicate delivery and reruns s
   f.verdict();
   await f.finish();
   assert.equal(check.conclusion, "success");
-  assert.equal(check.details_url, "https://linear.app/issue/100-99#comment-1");
+  assert.equal(check.details_url, f.reviews[0].html_url);
   assert.equal(f.ready.length, 1);
   await queueCheck(f.github, request(), appId);
   await f.finish();
@@ -141,7 +132,7 @@ test("same-head overlap cannot overwrite newer yellow or ready the draft", async
   assert.equal(f.checks[1].status, "queued");
   assert.equal(f.ready.length, 0);
   const { baseline } = await startCheck(f.github, request(11), appId);
-  await f.finish(request(11), { baseline, assessment: undefined });
+  await f.finish(request(11), { baseline });
   assert.equal(
     f.checks[1].conclusion,
     "failure",
@@ -183,16 +174,21 @@ test("a newer clean result survives late completion and already-ready PRs are no
 });
 
 test("findings, cap, missing/stale verdicts and execution failures never ready drafts", async () => {
-  for (const [options, conclusion] of [
-    [{ assessment: { requestId: request().externalId, headSha: head, disposition: "COMMENT", humanNeeded: false, githubAssessmentSummary: "Fix retry" } }, "action_required"],
-    [{ result: "failure" }, "failure"], [{ result: "cancelled" }, "cancelled"],
-    [{ ranReview: "false" }, "action_required"], [{ assessment: undefined }, "failure"],
-    [{ assessment: { requestId: "cadence:9:1:3", headSha: head } }, "failure"],
-    [{ baseline: undefined }, "failure"],
+  for (const [state, sha, options, conclusion] of [
+    ["COMMENTED", head, {}, "action_required"],
+    ["APPROVED", head, { result: "failure" }, "failure"],
+    ["APPROVED", head, { result: "cancelled" }, "cancelled"],
+    ["APPROVED", head, { ranReview: "false" }, "action_required"],
+    ["APPROVED", "b".repeat(40), {}, "failure"],
+    ["APPROVED", head, { reviewer: "another-bot" }, "failure"],
+    ["APPROVED", head, { baseline: 1 }, "failure"],
+    ["APPROVED", head, { baseline: undefined }, "failure"],
+    ["CHANGES_REQUESTED", head, {}, "failure"],
+    [null, head, {}, "failure"],
   ]) {
     const f = fixture();
     await queueCheck(f.github, request(), appId);
-    f.verdict(); // Historical review prose cannot satisfy or override the result.
+    if (state) f.verdict(state, sha);
     await f.finish(request(), options);
     assert.equal(f.checks[0].conclusion, conclusion);
     assert.doesNotMatch(f.checks[0].output.summary, /Review approved/);
@@ -234,12 +230,12 @@ test("denied readiness completes a failed advisory check and reports the exact o
     });
     assert.equal(f.checks[0].status, "completed");
     assert.equal(f.checks[0].conclusion, "failure");
-    assert.equal(f.checks[0].details_url, "https://linear.app/issue/100-99#comment-1");
+    assert.equal(f.checks[0].details_url, f.reviews[0].html_url);
     const check = f.checks[0];
     assert.match(check.output.summary, /Review approved; marking ready failed/);
     assert.ok(check.output.summary.includes(error.message));
     assert.ok(
-      check.output.summary.includes(`[Review](https://linear.app/issue/100-99#comment-1)`)
+      check.output.summary.includes(`[Review](${f.reviews[0].html_url})`)
     );
     assert.ok(
       check.output.summary.includes(
@@ -444,18 +440,4 @@ test("workflow puts recoverable admission before review queue and serializes onl
     )
   );
   assert.ok(config.ci.requiredChecks.every((check) => check.name === "Workflow tests"));
-});
-
-
-test("approval creates only an empty verdict record and retries do not duplicate it", async () => {
-  const f = fixture();
-  await queueCheck(f.github, request(), appId);
-  await f.finish();
-  assert.equal(f.reviews.length, 1);
-  assert.equal(f.reviews[0].state, "APPROVED");
-  assert.equal(f.reviews[0].body, "");
-  assert.equal(f.checks[0].conclusion, "success");
-  assert.equal(JSON.parse(f.checks[0].output.text).assessment.disposition, "APPROVE");
-  await f.finish();
-  assert.equal(f.reviews.length, 1);
 });

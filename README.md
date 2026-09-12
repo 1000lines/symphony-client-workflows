@@ -31,7 +31,7 @@ App identity, review outcome verification, advisory check and Linear handoff.
 Keep named secrets at repository scope or organization scope selected for the
 client, explicitly forwarding them at every reusable hop; do not use
 `secrets: inherit` or shadow forwarded credentials with environment secrets.
-Handoff and cleanup need App/Linear secrets; ingress needs none.
+Handoff needs App/Linear secrets, cleanup only the App key, and ingress none.
 See the [review configuration](docs/engineering/review/cadence-ai-review.md#required-configuration).
 
 ## Development
@@ -83,18 +83,16 @@ YAML step) and Copier tests are implementation proof, not live delivery evidence
 [GitHub event behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)
 · [Mergeability API behavior](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request)
 
-## One Cadence message
+## Hide copied Cadence reviews
 
-Both providers return the existing incremental workpad assessment. Native
-completion persists it through the Linear helper, retains the concise result and
-measured footer on the advisory check, and edits one App-owned PR comment.
-Approval emits only a bodyless APPROVE record for timeline compatibility;
-non-approval emits no formal review. Finish/recovery directly call the existing
-Linear/human handoff. Cleanup callers must forward `CADENCE_LINEAR_API_TOKEN`
-alongside the App key. Keep workflow/helper refs matched and adopt through Copier.
+Both providers retain their formal review body, verdict and existing check/Linear
+handoff. After copying the complete assessment to the existing App-owned status
+comment and reading it back, shared publication hides that same App-owned review
+using `minimizeComment` with `DUPLICATE`. It reads back `isMinimized: true` and
+`minimizedReason: duplicate`; human/other reviews and the status comment stay
+visible. Copy failure never hides the review. Hide failures retry through the
+existing completion/recovery path without replacing the comment or footer.
 
-Before rollout, verify approval, non-approval, a subsequent run and interrupted
-publication on one PR. Record the same comment ID, App identity, empty approval
-bodies/no new COMMENT reviews, check/run links and confirmed workpad handoff.
-Fixture tests prove implementation behavior; live evidence requires the reviewed
-caller on the client's trusted default branch.
+Use matching reviewed workflow/helper refs and propagate callers through Copier.
+Live proof must use the actual Cadence App token and retain the hide readback in
+the publication/recovery run; a human operator hiding a review is separate proof.

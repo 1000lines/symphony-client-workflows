@@ -35,14 +35,14 @@ const ISSUE_COMMENTS_QUERY = `query CadenceWorkpadIssue($id: String!, $after: St
 const CREATE_COMMENT_MUTATION = `mutation CreateCadenceWorkpad($issueId: String!, $body: String!) {
   commentCreate(input: { issueId: $issueId, body: $body }) {
     success
-    comment { id url }
+    comment { id }
   }
 }`;
 
 const UPDATE_COMMENT_MUTATION = `mutation UpdateCadenceWorkpad($commentId: String!, $body: String!) {
   commentUpdate(id: $commentId, input: { body: $body }) {
     success
-    comment { id url }
+    comment { id }
   }
 }`;
 
@@ -1074,7 +1074,6 @@ export const upsertCadenceWorkpad = async ({
       issueId: issue.id,
       issueIdentifier: issue.identifier,
       commentId: comment.id,
-      ...(comment.url ? { commentUrl: comment.url } : {}),
       body,
     };
   }
@@ -1086,7 +1085,6 @@ export const upsertCadenceWorkpad = async ({
     issueId: issue.id,
     issueIdentifier: issue.identifier,
     commentId: comment.id,
-    ...(comment.url ? { commentUrl: comment.url } : {}),
     body,
   };
 

@@ -61,6 +61,7 @@ function fixture(t) {
         }),
       },
       issues: {
+        getComment: async ({ comment_id }) => ({ data: comments.find(c => c.id === comment_id) }),
         listComments: "comments",
         createComment: async (input) => {
           writes.push(input);
@@ -87,6 +88,18 @@ function fixture(t) {
         : endpoint === "reviews"
         ? reviews
         : checks.filter((c) => c.head_sha === input.ref),
+    graphql: async (query, { id }) => {
+      const review = reviews.find(r => r.node_id === id);
+      assert.ok(review);
+      if (query.includes("minimizeComment")) {
+        assert.ok(comments[0].body.includes(review.body));
+        review.isMinimized = true;
+        review.minimizedReason = "duplicate";
+        return {};
+      }
+      return { node: { id, body: review.body, author: { login: review.user.login }, commit: { oid: review.commit_id },
+        isMinimized: review.isMinimized || false, minimizedReason: review.minimizedReason || null } };
+    },
     constructor: class {
       graphql() {
         assert.fail("Already-ready fixture must not change readiness");
@@ -112,6 +125,7 @@ function fixture(t) {
       },
       setFailed: assert.fail,
       warning() {},
+      info() {},
       summary: {
         addRaw() {
           return this;
@@ -169,8 +183,16 @@ test("real YAML publishes one comment through queued, reviewing, completion, dup
   assert.match(f.comments[0].body, /Queued/);
   assert.equal((await f.run(started)).active, true);
   assert.match(f.comments[0].body, /Reviewing/);
+  f.reviews.push({
+    id: 1,
+    node_id: "PRR_1",
+    state: "COMMENTED",
+    commit_id: head,
+    user: { login: "cadence[bot]", type: "Bot" },
+    body: "- Fix retry handling.",
+    html_url: "https://github.com/owner/repo/pull/3#pullrequestreview-1",
+  });
   await f.run(finished, {
-    REVIEW_ASSESSMENT: JSON.stringify({ requestId: request.externalId, headSha: head, disposition: "COMMENT", humanNeeded: false, githubAssessmentSummary: "- Fix retry handling." }),
     REVIEW_MEASUREMENTS: JSON.stringify({
       model: "observed",
       durationMs: 1200,
@@ -182,7 +204,8 @@ test("real YAML publishes one comment through queued, reviewing, completion, dup
     f.comments[0].body,
     /Needs attention[\s\S]*Fix retry handling[\s\S]*Model: observed/
   );
-  assert.equal(f.reviews.length, 0, "non-approval submits no formal review");
+  assert.equal(f.reviews[0].isMinimized, true);
+  assert.equal(f.reviews[0].minimizedReason, "duplicate");
   const body = f.comments[0].body;
   await f.run(finished);
   await f.run(recovered);
@@ -292,19 +315,22 @@ test("footer step uses provider execution measurements and omits prose and missi
 });
 
 
-test("assessment and measured footer recover when the check completes but the comment write fails", async t => {
+test("subsequent reviews copy and hide each original while keeping one comment and unchanged verdicts", async t => {
   const f = fixture(t);
-  await f.run(queued);
-  await f.run(started);
-  const write = f.github.rest.issues.updateComment;
-  f.github.rest.issues.updateComment = async () => { throw new Error("write failed"); };
-  await assert.rejects(f.run(finished, {
-    REVIEW_ASSESSMENT: JSON.stringify({ requestId: request.externalId, headSha: head, disposition: "COMMENT", humanNeeded: false, githubAssessmentSummary: "Retain this finding" }),
-    REVIEW_MEASUREMENTS: JSON.stringify({ durationMs: 1234 }),
-  }), /write failed/);
-  f.github.rest.issues.updateComment = write;
-  await f.run(recovered);
-  assert.match(f.comments[0].body, /Retain this finding[\s\S]*Review: 1.2s/);
-  assert.equal(f.comments.length, 1);
-  assert.equal(f.reviews.length, 0);
+  for (const [index, state] of [[1, "COMMENTED"], [2, "APPROVED"]]) {
+    const req = checkRequest({ ...context, runId: 9 + index }, 3, head);
+    await f.run(queued, {}, req);
+    const { baseline } = await f.run(started, {}, req);
+    f.reviews.push({ id: index, node_id: `PRR_${index}`, state, commit_id: head,
+      user: { login: "cadence[bot]", type: "Bot" }, body: `Assessment ${index}: original body`,
+      html_url: `https://github.com/owner/repo/pull/3#pullrequestreview-${index}` });
+    await f.run(finished, { REVIEW_BASELINE: String(baseline) }, req);
+    assert.equal(f.reviews[index - 1].body, `Assessment ${index}: original body`);
+    assert.equal(f.reviews[index - 1].state, state);
+    assert.equal(f.reviews[index - 1].isMinimized, true);
+    assert.equal(f.comments.length, 1);
+    assert.match(f.comments[0].body, new RegExp(`Assessment ${index}: original body`));
+  }
+  assert.equal(f.checks[0].conclusion, "action_required");
+  assert.equal(f.checks[1].conclusion, "success");
 });

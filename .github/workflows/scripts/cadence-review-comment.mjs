@@ -1,4 +1,4 @@
-// Presentation only: the existing App check carries the verified assessment.
+// Presentation only: the existing check and submitted review own the verdict.
 export const COMMENT_MARKER = "<!-- cadence-status -->";
 
 const compact = (text, limit) => {
@@ -66,7 +66,7 @@ export function reviewFooter({
   return parts.join(" · ");
 }
 
-export function renderComment(request, check, { assessment: result, measurements } = {}) {
+export function renderComment(request, check, { review, measurements } = {}) {
   const status =
     check.status === "queued"
       ? "Queued"
@@ -78,15 +78,9 @@ export function renderComment(request, check, { assessment: result, measurements
           cancelled: "Cancelled",
           timed_out: "Failed",
         }[check.conclusion] || "Failed";
-  // Bound the existing human assessment, never interpret its prose as a verdict.
-  let points = 0;
-  const assessment = compact(
-    String(result?.githubAssessmentSummary || "")
-      .split("\n")
-      .filter((line) => !/^\s*[-*]\s/.test(line) || ++points <= 3)
-      .join("\n"),
-    1400
-  );
+  // Copy the complete assessment before hiding its original review. Dropping
+  // findings for presentation would make the original unsafe to minimize.
+  const assessment = String(review?.body || "").trim();
   const summary =
     check.status === "queued"
       ? "Waiting for the review to start."
@@ -103,7 +97,7 @@ export function renderComment(request, check, { assessment: result, measurements
     `[Head ${request.head.slice(0, 7)}](https://github.com/${request.owner}/${
       request.repo
     }/commit/${request.head}) · [Run](${request.runUrl})${
-      result?.workpadUrl ? ` · [Review evidence](${result.workpadUrl})` : ""
+      review?.html_url ? ` · [Review and evidence](${review.html_url})` : ""
     }`,
     footer ? `---\n${footer}` : "",
   ]
@@ -111,17 +105,127 @@ export function renderComment(request, check, { assessment: result, measurements
     .join("\n\n");
 }
 
-// Read the persisted check, including retries after check completion succeeded
-// but comment publication failed. Measurements survive job-output loss too.
-export async function publishRequestComment(github, request, app, details = {}) {
+// Read the persisted check, including on retry/recovery after its write succeeded
+// but comment publication failed. Its linked review is the existing verdict record.
+export async function publishRequestComment(
+  github,
+  request,
+  app,
+  details = {}
+) {
   const checks = await github.paginate(github.rest.checks.listForRef, {
-    owner: request.owner, repo: request.repo, ref: request.head,
-    check_name: "Cadence review", app_id: Number(app.id), filter: "all", per_page: 100,
+    owner: request.owner,
+    repo: request.repo,
+    ref: request.head,
+    check_name: "Cadence review",
+    app_id: Number(app.id),
+    filter: "all",
+    per_page: 100,
   });
-  const check = checks.find(item => item.external_id === request.externalId);
+  const check = checks.find((item) => item.external_id === request.externalId);
   if (!check) return { skipped: "missing-check" };
-  const persisted = JSON.parse(check.output?.text || "{}");
-  return publishComment(github, request, app, check, { ...details, ...persisted });
+  const reviewId = check.details_url?.match(/#pullrequestreview-(\d+)$/)?.[1];
+  let review;
+  if (check.status === "completed" && reviewId) {
+    const { data } = await github.rest.pulls.getReview({
+      owner: request.owner,
+      repo: request.repo,
+      pull_number: request.number,
+      review_id: Number(reviewId),
+    });
+    if (
+      data.commit_id === request.head &&
+      data.user?.login === `${app.slug}[bot]` &&
+      data.user?.type === "Bot" &&
+      (!data.performed_via_github_app ||
+        data.performed_via_github_app.id === Number(app.id))
+    )
+      review = data;
+  }
+  const published = await publishComment(github, request, app, check, {
+    ...details,
+    review,
+  });
+  if (!published.id || !review?.body?.trim()) return published;
+  // A completed-comment retry still reaches this step: a failed hide must not
+  // create another comment or lose the original measured footer.
+  const { data: copied } = await github.rest.issues.getComment({
+    owner: request.owner,
+    repo: request.repo,
+    comment_id: published.id,
+  });
+  if (
+    copied.user?.login !== `${app.slug}[bot]` ||
+    copied.user?.type !== "Bot" ||
+    (copied.performed_via_github_app &&
+      copied.performed_via_github_app.id !== Number(app.id)) ||
+    !copied.body?.startsWith(COMMENT_MARKER) ||
+    !copied.body.includes(
+      `<!-- ${request.externalId} check:${check.id} state:completed -->`
+    ) ||
+    !copied.body.includes(review.body.trim()) ||
+    !copied.body.includes(review.html_url)
+  )
+    throw new Error(
+      "Cadence review copy could not be verified; leaving the original review visible"
+    );
+  const { data: pr } = await github.rest.pulls.get({
+    owner: request.owner,
+    repo: request.repo,
+    pull_number: request.number,
+  });
+  const currentChecks = await github.paginate(github.rest.checks.listForRef, {
+    owner: request.owner,
+    repo: request.repo,
+    ref: request.head,
+    check_name: "Cadence review",
+    app_id: Number(app.id),
+    filter: "all",
+    per_page: 100,
+  });
+  if (
+    pr.state !== "open" ||
+    pr.head.sha !== request.head ||
+    currentChecks.some(
+      (item) =>
+        item.id > check.id && item.external_id?.endsWith(`:${request.number}`)
+    )
+  )
+    return { ...published, hideSkipped: "closed-stale-or-newer-request" };
+  const query = `query($id: ID!) { node(id: $id) { ... on PullRequestReview {
+    id body author { login } commit { oid } isMinimized minimizedReason
+  } } }`;
+  const read = async () =>
+    (await github.graphql(query, { id: review.node_id })).node;
+  const original = await read();
+  if (
+    original?.id !== review.node_id ||
+    original.author?.login !== `${app.slug}[bot]` ||
+    original.commit?.oid !== request.head ||
+    original.body !== review.body
+  )
+    throw new Error(
+      "Cadence review changed before hiding; leaving the original review visible"
+    );
+  if (!original.isMinimized || original.minimizedReason !== "duplicate") {
+    await github.graphql(
+      `mutation($id: ID!) {
+      minimizeComment(input: { subjectId: $id, classifier: DUPLICATE }) {
+        minimizedComment { isMinimized minimizedReason }
+      }
+    }`,
+      { id: review.node_id }
+    );
+  }
+  const hidden = await read();
+  if (!hidden?.isMinimized || hidden.minimizedReason !== "duplicate")
+    throw new Error("Cadence review hide was not confirmed; retry publication");
+  return {
+    ...published,
+    hiddenReview: review.id,
+    isMinimized: true,
+    minimizedReason: hidden.minimizedReason,
+  };
 }
 
 // Call under the existing per-PR publication lock with the minted App identity.

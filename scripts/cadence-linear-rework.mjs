@@ -163,8 +163,6 @@ export const classifyCadenceLinearReworkEvent = ({
   }
 
   if (normalize(reviewer) === normalize(cadenceReviewerLogin)) {
-    if (reviewState === "approved" && !hasReviewBodyContent(reviewBody))
-      return { ...base, reason: "cadence-minimal-approval-routed-by-completion" };
     if (hasHumanInputNeededContent(reviewBody)) {
       return {
         ...base,
@@ -360,10 +358,8 @@ export const routeReviewHandoff = async ({
   cadenceReviewerLogin = DEFAULT_CADENCE_REVIEWER_LOGIN,
   symphonyAuthorLogin = DEFAULT_SYMPHONY_AUTHOR_LOGIN,
   fetchImpl = fetch,
-  checkResult,
-  isCurrent,
 }) => {
-  let decision = checkResult?.decision || classifyCadenceLinearReworkEvent({
+  let decision = classifyCadenceLinearReworkEvent({
     payload,
     eventName,
     cadenceReviewerLogin,
@@ -375,7 +371,6 @@ export const routeReviewHandoff = async ({
     issueId: "",
     headSha: payload.pull_request?.head?.sha || "",
     reviewId: String(payload.review?.id || ""),
-    ...(checkResult ? { checkId: checkResult.checkId } : {}),
     commentId: String(payload.comment?.id || ""),
     triggerSource: `${eventName}.${payload.action || ""}`,
     runUrl,
@@ -445,7 +440,7 @@ export const routeReviewHandoff = async ({
     }
     if (
       !result.headSha ||
-      !(result.reviewId || result.commentId || result.checkId) ||
+      !(result.reviewId || result.commentId) ||
       !result.actor ||
       !runUrl
     ) {
@@ -472,9 +467,7 @@ export const routeReviewHandoff = async ({
         commentId,
         options
       );
-      if (isCurrent && !(await isCurrent())) {
-        result.skippedReason = "closed-stale-or-newer-check";
-      } else if (decision.shouldMove) {
+      if (decision.shouldMove) {
         result = {
           ...result,
           ...(await wakeLinearIssue({
@@ -527,38 +520,6 @@ export const routeReviewHandoff = async ({
   }
   return result;
 };
-
-// Called only by the trusted finish/recovery jobs. Reuse the same workpad and
-// Linear/human mutation path, with the App check as the source of the decision.
-export async function routeCheckHandoff({ github, request, app, token, githubToken,
-  symphonyAuthorLogin = DEFAULT_SYMPHONY_AUTHOR_LOGIN, fetchImpl = fetch }) {
-  const { readCheckAssessment } = await import("../.github/workflows/scripts/cadence-review-check.mjs");
-  const read = () => readCheckAssessment(github, request, app.id);
-  const current = await read();
-  if (!current) return { operation: "skipped", skippedReason: "no-current-check-assessment" };
-  const { pr, check, assessment } = current;
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(app.slug || "")) throw new Error("Missing minted App slug");
-  const issueIdentifier = issueIdentifierForPullRequest({ title: pr.title, headRef: pr.head.ref });
-  if (normalize(pr.user?.login) !== normalize(symphonyAuthorLogin) || !hasLabel(pr, REQUIRED_LABEL) || !issueIdentifier)
-    return { operation: "skipped", skippedReason: "ineligible-pr" };
-  const issue = await fetchIssueComments(issueIdentifier, token, { fetchImpl });
-  const prior = findCadenceWorkpadComment(issue.comments);
-  const handoff = prior && parseCadenceWorkpad(prior.body).coordination?.reviewHandoff;
-  if (handoff?.checkId === check.id && handoff.operation !== "failed" && handoff.operation !== "pending" && !handoff.evidenceError &&
-      (!handoff.humanReview || ["requested", "already-requested"].includes(handoff.humanReview.operation)))
-    return { ...handoff, operation: "skipped", skippedReason: "check-already-routed" };
-  const human = assessment.disposition === "APPROVE" || assessment.humanNeeded;
-  const reviewer = `${app.slug}[bot]`;
-  return routeReviewHandoff({
-    payload: { action: "completed", pull_request: pr, repository: { full_name: `${request.owner}/${request.repo}` } },
-    eventName: "cadence_check", token, githubToken, fetchImpl, cadenceReviewerLogin: reviewer,
-    symphonyAuthorLogin, runUrl: request.runUrl,
-    checkResult: { checkId: check.id, decision: { prNumber: String(request.number), issueIdentifier,
-      reviewer, reviewState: assessment.disposition, shouldMove: !human, shouldRequestHumanReview: human,
-      reason: human ? "cadence-check-human-handoff" : "cadence-check-actionable-findings" } },
-    isCurrent: async () => Boolean(await read()),
-  });
-}
 
 const main = async () => {
   const payload = JSON.parse(

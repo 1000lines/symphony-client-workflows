@@ -369,7 +369,7 @@ test("bootstrap CLI uses host review mode without a repository registry", () => 
   const pr = { headRefOid: "a".repeat(40), isDraft: true,
     timelineItems: { nodes: [], pageInfo: { hasPreviousPage: false } } };
   const script = `process.argv = [process.execPath, ${JSON.stringify(fileURLToPath(cli))}, "6"];
-    globalThis.fetch = async url => url.includes("/check-runs?") ? ({ ok: true, json: async () => ({ check_runs: [], total_count: 0 }) }) : ({ ok: true, json: async () => (${JSON.stringify({ data: { repository: { pullRequest: pr } } })}) });
+    globalThis.fetch = async () => ({ ok: true, json: async () => (${JSON.stringify({ data: { repository: { pullRequest: pr } } })}) });
     await import(${JSON.stringify(cli.href)});`;
   for (const mode of ["", "HACKATHON_LEGACY_REVIEW", "checks", "unknown"]) {
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
@@ -383,18 +383,4 @@ test("bootstrap CLI uses host review mode without a repository registry", () => 
       assert.match(result.stderr, /Legacy review disabled/);
     }
   }
-});
-
-
-test("completed non-approval check anchors subsequent feedback without a COMMENT review event", () => {
-  const reviewer = "cadence[bot]";
-  const pr = { headRefOid: "head", isDraft: true, timelineItems: { pageInfo: { hasPreviousPage: false }, nodes: [
-    { __typename: "PullRequestCommit", commit: { oid: "head", committedDate: "2026-09-12T00:00:00Z", author: { user: { login: "example-lead" } } } },
-  ] }, cadenceAssessment: { __typename: "CadenceAssessment", author: { login: reviewer }, state: "COMMENTED", commit: { oid: "head" }, submittedAt: "2026-09-12T00:01:00Z" } };
-  const result = classifyPrReviewState(pr, reviewer);
-  assert.equal(result.decision, "skip");
-  assert.equal(result.humanGroundedSince.length, 0);
-  assert.equal(result.lastReview.state, "COMMENTED");
-  pr.timelineItems.nodes.push({ __typename: "PullRequestCommit", commit: { oid: "next", committedDate: "2026-09-12T00:02:00Z", author: { user: { login: "example-symphony-bot" } } } });
-  assert.equal(classifyPrReviewState(pr, reviewer).decision, "incremental");
 });

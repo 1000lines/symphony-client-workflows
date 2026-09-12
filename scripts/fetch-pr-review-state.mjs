@@ -183,18 +183,14 @@ export const classifyPrReviewState = (
   { classifyActor = classifyGitHubActor, acceptance } = {}
 ) => {
   if (acceptance) return classifyCheckReviewState({ ...acceptance, pullRequest: pr });
-  const nodes = [...pr.timelineItems.nodes];
-  if (pr.cadenceAssessment) {
-    nodes.push(pr.cadenceAssessment);
-    nodes.sort((a, b) => Date.parse(timestampOf(a)) - Date.parse(timestampOf(b)));
-  }
+  const nodes = pr.timelineItems.nodes;
   const pagedOut = pr.timelineItems.pageInfo.hasPreviousPage;
 
   let anchorIndex = -1;
   let lastReview = null;
   nodes.forEach((node, i) => {
     if (
-      ["PullRequestReview", "CadenceAssessment"].includes(node.__typename) &&
+      node.__typename === "PullRequestReview" &&
       normalize(actorOf(node)) === normalize(reviewer)
     ) {
       anchorIndex = i;
@@ -412,31 +408,6 @@ const main = async () => {
     throw new Error("Legacy review disabled; use trusted classifyCheckReviewState acquisition.");
   }
   const pr = await runQuery({ owner, repo, number });
-  // A completed non-approval has no formal review event. Reuse its persisted
-  // App check as the review timestamp so old human feedback cannot reset the
-  // loop on every retry. Missing prior-head checks safely require a full pass.
-  let page = 1;
-  const checks = [];
-  while (true) {
-    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits/${pr.headRefOid}/check-runs?check_name=Cadence%20review&filter=all&per_page=100&page=${page++}`, {
-      headers: { authorization: `Bearer ${process.env.GH_TOKEN}`, accept: "application/vnd.github+json" },
-    });
-    if (!response.ok) throw new Error(`Could not read Cadence check history (HTTP ${response.status})`);
-    const data = await response.json();
-    checks.push(...data.check_runs);
-    if (checks.length >= data.total_count || data.check_runs.length < 100) break;
-  }
-  const completed = checks.filter(check => `${check.app?.slug}[bot]` === reviewer &&
-    check.head_sha === pr.headRefOid && check.external_id?.endsWith(`:${number}`) &&
-    check.status === "completed" && ["success", "action_required"].includes(check.conclusion) && check.output?.text)
-    .sort((a, b) => b.id - a.id)[0];
-  if (completed) {
-    const { assessment } = JSON.parse(completed.output.text);
-    if (assessment?.requestId === completed.external_id && assessment.headSha === pr.headRefOid)
-      pr.cadenceAssessment = { __typename: "CadenceAssessment", author: { login: reviewer },
-        submittedAt: completed.completed_at, commit: { oid: pr.headRefOid },
-        state: completed.conclusion === "success" ? "APPROVED" : "COMMENTED" };
-  }
   process.stdout.write(
     `${JSON.stringify(classifyPrReviewState(pr, reviewer), null, 2)}\n`
   );
