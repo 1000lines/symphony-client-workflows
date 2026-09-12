@@ -156,7 +156,7 @@ current state; its outcome verifier rejects missing or stale-head reviews.
 Cadence keeps one App-owned PR conversation comment, identified by
 `<!-- cadence-status -->` and the minted App identity. It shows queued,
 reviewing, approved/needs-attention, or failed/cancelled status, a short assessment
-with up to three findings, and links to the reviewed head, run and formal review.
+with all findings, and links to the reviewed head, run and formal review.
 The formal review and structured Linear workpad keep their existing roles and
 history; this comment is presentation, not verdict authority.
 
@@ -614,3 +614,24 @@ marker. A marker does not enable completion routing from a non-Symphony branch.
 
 Slack notifications are deferred. This workflow does not reference Slack secrets
 and does not send Slack messages.
+
+## Hide duplicate formal commentary
+
+Formal reviews remain the verdict and handoff records for both providers. Shared
+publication copies the full review assessment into the existing editable App
+comment, reads the comment back, and only then hides the matching current-head
+Cadence review with GraphQL `minimizeComment` and classifier `DUPLICATE`. It
+verifies `isMinimized=true` and `minimizedReason=duplicate` with a separate query.
+The original body, verdict, ID and evidence stay intact. Human and other App
+reviews, and the consolidated comment, are never hidden by this path.
+
+A failed copy/readback leaves the original visible. A denied or unconfirmed hide
+fails publication and remains retryable through the existing completion/cleanup
+flow; an already completed comment does not suppress the hide retry. Subsequent
+reviews update the same comment. Current-head and newer-request guards still
+apply. The native finish/recovery logs include the verified hide result.
+
+Adoption requires matched shared workflow/helper refs via Copier. Retain a live
+Cadence App run showing the original review ID/body/verdict, stable comment ID
+and hide readback. Interactive operator hiding does not prove the workflow App
+can minimize reviews. Do not switch credentials or expand permissions on failure.

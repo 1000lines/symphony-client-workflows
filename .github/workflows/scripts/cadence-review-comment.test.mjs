@@ -4,6 +4,7 @@ import { checkRequest } from "./cadence-review-check.mjs";
 import {
   COMMENT_MARKER,
   publishComment,
+  publishRequestComment,
   renderComment,
   reviewFooter,
   reviewMeasurements,
@@ -195,7 +196,7 @@ test("ambiguous successful creation converges on retry; API failures stay retrya
   assert.match(f.comments[0].body, /Queued/);
 });
 
-test("compact assessment links evidence, limits findings, and keeps the footer last", () => {
+test("complete assessment links evidence, retains every finding, and keeps the footer last", () => {
   const f = fixture();
   f.check.status = "completed";
   f.check.conclusion = "action_required";
@@ -213,7 +214,8 @@ test("compact assessment links evidence, limits findings, and keeps the footer l
   });
   assert.match(body, /Needs attention/);
   assert.match(body, /Fix the retry/);
-  assert.doesNotMatch(body, /fourth|Detailed bookkeeping/);
+  assert.match(body, /fourth/);
+  assert.doesNotMatch(body, /Detailed bookkeeping/);
   assert.match(body, /Review and evidence/);
   assert.ok(
     body.endsWith(
@@ -221,8 +223,9 @@ test("compact assessment links evidence, limits findings, and keeps the footer l
     )
   );
   assert.ok(
-    renderComment(request, f.check, { review: { body: "x".repeat(10000) } })
-      .length < 2300
+    renderComment(request, f.check, {
+      review: { body: "x".repeat(10000) },
+    }).includes("x".repeat(10000))
   );
 });
 
@@ -267,4 +270,132 @@ test("only measured telemetry is shown, including zero usage and observed/reques
     ),
     "Review: 2.0s"
   );
+});
+
+function hideFixture() {
+  const f = fixture();
+  const review = {
+    id: 7,
+    node_id: "PRR_7",
+    body: "Assessment: Blocked\n\n- Fix retry handling.",
+    commit_id: head,
+    user: { login: "cadence[bot]", type: "Bot" },
+    html_url: "https://github.com/owner/repo/pull/3#pullrequestreview-7",
+  };
+  Object.assign(f.check, {
+    status: "completed",
+    conclusion: "action_required",
+    details_url: review.html_url,
+  });
+  const node = {
+    id: review.node_id,
+    body: review.body,
+    author: { login: "cadence[bot]" },
+    commit: { oid: head },
+    isMinimized: false,
+    minimizedReason: null,
+  };
+  const mutations = [];
+  f.github.rest.pulls.getReview = async () => ({ data: review });
+  f.github.rest.issues.getComment = async ({ comment_id }) => ({
+    data: f.comments.find((c) => c.id === comment_id),
+  });
+  f.github.graphql = async (query, variables) => {
+    assert.equal(variables.id, review.node_id);
+    if (query.includes("minimizeComment")) {
+      mutations.push(variables.id);
+      assert.match(query, /classifier: DUPLICATE/);
+      assert.equal(f.comments.length, 1);
+      assert.ok(f.comments[0].body.includes(review.body));
+      node.isMinimized = true;
+      node.minimizedReason = "duplicate";
+      return { minimizeComment: { minimizedComment: node } };
+    }
+    return { node: structuredClone(node) };
+  };
+  return {
+    ...f,
+    review,
+    node,
+    mutations,
+    run: () => publishRequestComment(f.github, request, app),
+  };
+}
+
+for (const state of ["APPROVED", "COMMENTED"]) {
+  test(`${state}: verify the full App comment before hiding, read back Duplicate, and converge on repeat`, async () => {
+    const f = hideFixture();
+    f.review.state = state;
+    const original = structuredClone(f.review);
+    const result = await f.run();
+    assert.equal(result.hiddenReview, f.review.id);
+    assert.equal(result.isMinimized, true);
+    assert.equal(result.minimizedReason, "duplicate");
+    await f.run();
+    assert.deepEqual(f.review, original, "body, verdict and ID remain intact");
+    assert.equal(f.comments.length, 1);
+    assert.equal(f.writes.length, 1);
+    assert.equal(f.mutations.length, 1);
+  });
+}
+
+test("copy failure or failed copy readback never hides the source review", async () => {
+  for (const failure of ["write", "readback"]) {
+    const f = hideFixture();
+    if (failure === "write")
+      f.github.rest.issues.createComment = async () => {
+        throw new Error("copy denied");
+      };
+    else
+      f.github.rest.issues.getComment = async () => ({
+        data: { ...f.comments[0], body: "incomplete copy" },
+      });
+    await assert.rejects(f.run(), /copy/);
+    assert.equal(f.mutations.length, 0);
+    assert.equal(f.node.isMinimized, false);
+  }
+});
+
+test("hide denial and unconfirmed hide remain retryable without changing the completed comment", async () => {
+  for (const failure of ["denied", "readback", "lost-response"]) {
+    const f = hideFixture();
+    const graphql = f.github.graphql;
+    f.github.graphql = async (query, variables) => {
+      if (!query.includes("minimizeComment")) return graphql(query, variables);
+      if (failure === "denied") throw new Error("403 hide denied");
+      if (failure === "lost-response") {
+        await graphql(query, variables);
+        throw new Error("response lost");
+      }
+      return {};
+    };
+    await assert.rejects(f.run(), /hide denied|not confirmed|response lost/);
+    const copied = f.comments[0].body;
+    f.github.graphql = graphql;
+    await f.run();
+    assert.equal(f.node.isMinimized, true);
+    assert.equal(f.comments.length, 1);
+    assert.equal(f.comments[0].body, copied);
+  }
+});
+
+test("human/other reviews, changed review bodies, and stale/newer work are never hidden", async () => {
+  for (const scenario of [
+    "human",
+    "other-app",
+    "review-changed",
+    "head",
+    "newer",
+  ]) {
+    const f = hideFixture();
+    if (scenario === "human") f.review.user.login = "human";
+    if (scenario === "other-app") f.review.user.login = "other[bot]";
+    if (scenario === "review-changed") f.node.body = "Edited assessment";
+    if (scenario === "head") f.pr.head.sha = "b".repeat(40);
+    if (scenario === "newer") f.checks.push({ ...f.check, id: 9 });
+    if (scenario === "review-changed")
+      await assert.rejects(f.run(), /review changed/);
+    else await f.run();
+    assert.equal(f.mutations.length, 0, scenario);
+  }
 });

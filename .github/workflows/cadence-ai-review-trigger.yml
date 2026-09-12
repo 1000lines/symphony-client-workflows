@@ -212,7 +212,7 @@ jobs:
             const check = await queueCheck(github, JSON.parse(process.env.CHECK_REQUEST), '${{ vars.CADENCE_APP_ID }}');
             core.setOutput('check_id', check.id);
             const { publishRequestComment } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/cadence-review-comment.mjs`);
-            await publishRequestComment(github, JSON.parse(process.env.CHECK_REQUEST), { id: '${{ vars.CADENCE_APP_ID }}', slug: '${{ steps.app-token.outputs.app-slug }}' });
+            core.info(JSON.stringify(await publishRequestComment(github, JSON.parse(process.env.CHECK_REQUEST), { id: '${{ vars.CADENCE_APP_ID }}', slug: '${{ steps.app-token.outputs.app-slug }}' })));
 
   review:
     name: "Review PR #${{ inputs.pr_number || github.event.pull_request.number }}"
@@ -291,6 +291,6 @@ jobs:
               readyGraphql: handoffGithub.graphql,
             });
             const { publishRequestComment } = await import(`${process.env.GITHUB_WORKSPACE}/.github/workflows/scripts/cadence-review-comment.mjs`);
-            await publishRequestComment(github, JSON.parse(process.env.CHECK_REQUEST), { id: '${{ vars.CADENCE_APP_ID }}', slug: '${{ steps.app-token.outputs.app-slug }}' }, { measurements: JSON.parse(process.env.REVIEW_MEASUREMENTS || '{}') });
+            core.info(JSON.stringify(await publishRequestComment(github, JSON.parse(process.env.CHECK_REQUEST), { id: '${{ vars.CADENCE_APP_ID }}', slug: '${{ steps.app-token.outputs.app-slug }}' }, { measurements: JSON.parse(process.env.REVIEW_MEASUREMENTS || '{}') })));
             if (outcome) await core.summary.addRaw(`${outcome.summary}\n`).write();
             if (outcome?.handoffError) core.setFailed(outcome.handoffError);

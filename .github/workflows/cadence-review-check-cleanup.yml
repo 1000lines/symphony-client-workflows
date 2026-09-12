@@ -96,5 +96,5 @@ jobs:
               const request = JSON.parse(fs.readFileSync(`${directory}/${file}`, 'utf8'));
               if (String(request.number) !== '${{ matrix.number }}') throw new Error('Recovery pointer does not match the locked PR');
               await recoverCheck(github, context, request, '${{ vars.CADENCE_APP_ID }}', context.payload.workflow_run);
-              await publishRequestComment(github, request, { id: '${{ vars.CADENCE_APP_ID }}', slug: '${{ steps.app-token.outputs.app-slug }}' });
+              core.info(JSON.stringify(await publishRequestComment(github, request, { id: '${{ vars.CADENCE_APP_ID }}', slug: '${{ steps.app-token.outputs.app-slug }}' })));
             }
