@@ -132,44 +132,12 @@ test("publishing preflight rejects missing App identity, user tokens and wrong r
   }
 });
 
-test("legacy users and unrelated Apps cannot satisfy App review verification", async (t) => {
-  const previousPr = process.env.PR_NUMBER;
-  process.env.PR_NUMBER = "33";
-  t.after(() => {
-    if (previousPr === undefined) delete process.env.PR_NUMBER;
-    else process.env.PR_NUMBER = previousPr;
-  });
-  for (const [reviewer, author] of [
-    ["cadence[bot]", "legacy-cadence-user"],
-    ["cadence[bot]", "unrelated[bot]"],
-    ["", "cadence[bot]"],
-    ["legacy-cadence-user", "legacy-cadence-user"],
-  ]) {
-    const errors = [];
-    await verifyCadenceAiReview({
-      reviewer,
-      reviewOutcome: "success",
+test("missing App identity and old reviews cannot replace a current assessment", async () => {
+  for (const reviewer of ["", "legacy-cadence-user", "cadence[bot]"]) {
+    await assert.rejects(verifyCadenceAiReview({ reviewer, reviewOutcome: "success",
       context: { repo: { owner: "owner", repo: "repo" } },
-      core: { setFailed: (message) => errors.push(message) },
-      github: {
-        rest: {
-          pulls: {
-            get: async () => ({ data: { head: { sha: "head" } } }),
-            listReviews: "reviews",
-          },
-        },
-        paginate: async () => [
-          { user: { login: author }, state: "APPROVED", commit_id: "head" },
-        ],
-      },
-    });
-    assert.equal(errors.length, 1);
-    assert.match(
-      errors[0],
-      reviewer.endsWith("[bot]")
-        ? /No Cadence review at current head/
-        : /trusted Cadence App reviewer login/
-    );
+      github: { paginate: async () => [{ state: "APPROVED", commit_id: "head" }] },
+    }), /trusted Cadence App|current-head reviewUpdate/);
   }
 });
 
@@ -239,61 +207,12 @@ test("trusted event calls allow their verified trigger actor without changing pu
   assert.equal(steps.find((step) => step.id === "plan").env.TRIGGER_ACTOR, "${{ github.actor }}");
 });
 
-test("outcome verification preserves startup failure, current-head checks and review cleanup", async (t) => {
-  const step = runWorkflow.jobs.review.steps.find((entry) => entry.name.startsWith("Verify review outcomes"));
+test("assessment verification runs after either provider and fails closed", () => {
+  const step = runWorkflow.jobs.review.steps.find(entry => entry.id === "verified");
   assert.equal(step.if, "always() && steps.plan.outputs.run_claude == 'true'");
   assert.equal(step.env.CADENCE_REVIEW_OUTCOME, "${{ inputs.provider == 'codex' && steps.codex_review.outcome || steps.cadence_review.outcome }}");
-  const AsyncFunction = Object.getPrototypeOf(async function () { return undefined; }).constructor;
-  const run = new AsyncFunction("require", "github", "context", "core", "process", step.with.script);
-  const previousPr = process.env.PR_NUMBER;
-  process.env.PR_NUMBER = "33";
-  t.after(() => {
-    if (previousPr === undefined) delete process.env.PR_NUMBER;
-    else process.env.PR_NUMBER = previousPr;
-  });
-
-  for (const [outcome, state, sha, fails, dismisses] of [
-    ["success", "APPROVED", "head", false, false],
-    ["success", "COMMENTED", "head", false, false],
-    ["success", "PENDING", "head", true, false],
-    ["success", "DISMISSED", "head", true, false],
-    ["success", "APPROVED", "stale", true, false],
-    ["failure", "APPROVED", "head", true, false],
-    ["failure", null, null, true, false],
-    ["skipped", null, null, true, false],
-    ["cancelled", null, null, true, false],
-    ["", null, null, true, false],
-    ["success", "CHANGES_REQUESTED", "head", true, true],
-    ["failure", "CHANGES_REQUESTED", "head", true, true],
-  ]) {
-    const errors = [];
-    const dismissed = [];
-    const github = {
-      rest: {
-        users: { getAuthenticated: async () => assert.fail("Installation tokens cannot read /user") },
-        pulls: {
-          get: async () => ({ data: { head: { sha: "head" } } }),
-          listReviews: "reviews",
-          dismissReview: async (input) => dismissed.push(input.review_id),
-        },
-      },
-      paginate: async () => state ? [{ id: 1, user: { login: "cadence[bot]" }, state, commit_id: sha }] : [],
-    };
-    await run(
-      () => verifyCadenceAiReview, github, { repo: { owner: "owner", repo: "repo" } },
-      { setFailed: (message) => errors.push(message) },
-      { env: { CADENCE_REVIEWER_LOGIN: "cadence[bot]", CADENCE_REVIEW_OUTCOME: outcome } },
-    );
-    assert.equal(errors.length > 0, fails, `${outcome}: ${state} at ${sha}`);
-    assert.equal(dismissed.length > 0, dismisses);
-    if (outcome !== "success") {
-      assert.match(errors.join(" "), /Review execution did not succeed/);
-      assert.doesNotMatch(errors.join(" "), /reported success/);
-    }
-    if (state === null || sha === "stale") {
-      assert.match(errors.join(" "), /No Cadence review at current head/);
-    }
-  }
+  assert.match(step.with.script, /cadence-review-update.json/);
+  assert.equal(step.env.CHECK_REQUEST, "${{ inputs.request }}");
 });
 
 test("the review trigger uses the existing App for feedback permission reads", () => {

@@ -239,85 +239,29 @@ const runDryRun = (argv) => {
 };
 
 const verifyCadenceAiReview = async function verifyCadenceAiReview({
-  github,
-  context,
-  core,
-  reviewOutcome,
-  reviewer,
+  github, context, core, reviewOutcome, reviewer, request, workpad, issueIdentifier, token, fetchImpl = fetch,
 }) {
-  const { owner, repo } = context.repo;
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*\[bot\]$/.test(reviewer || "")) {
-    core.setFailed("A trusted Cadence App reviewer login is required.");
-    return;
-  }
-
-  const number = Number(process.env.PR_NUMBER);
-  if (!Number.isInteger(number) || number <= 0) {
-    core.setFailed("PR_NUMBER must be set to the reviewed pull request.");
-    return;
-  }
-
-  const dismissed = [];
-  const unreviewed = [];
-  const { data: pr } = await github.rest.pulls.get({
-    owner,
-    repo,
-    pull_number: number,
-  });
-  const reviews = await github.paginate(github.rest.pulls.listReviews, {
-    owner,
-    repo,
-    pull_number: number,
-    per_page: 100,
-  });
-  const mine = reviews.filter((review) => review.user?.login === reviewer);
-  for (const review of mine) {
-    if (review.state === "CHANGES_REQUESTED") {
-      await github.rest.pulls.dismissReview({
-        owner,
-        repo,
-        pull_number: number,
-        review_id: review.id,
-        message:
-          "Cadence AI Review does not request changes; this review was dismissed automatically.",
-      });
-      dismissed.push(`#${number} review ${review.id}`);
-    }
-  }
-  // False-green guard: a successful run must leave a Cadence review at the
-  // current head. A failed Action must also fail when an older review exists.
-  const validCurrentHeadReview = mine.some(
-    (review) =>
-      review.commit_id === pr.head.sha &&
-      ["APPROVED", "COMMENTED"].includes(review.state)
-  );
-  if (!validCurrentHeadReview) {
-    unreviewed.push(`#${number} (head ${pr.head.sha.slice(0, 8)})`);
-  }
-
-  const problems = [];
-  if (reviewOutcome !== "success") {
-    problems.push(
-      `Cadence AI review Action outcome: ${
-        reviewOutcome || "unknown"
-      }. Review execution did not succeed; inspect the Run Cadence AI review step.`
-    );
-  }
-  if (unreviewed.length > 0) {
-    problems.push(
-      `No Cadence review at current head for ${unreviewed.join(
-        ", "
-      )} - no completed review was found.`
-    );
-  }
-  if (dismissed.length > 0) {
-    problems.push(
-      `Dismissed disallowed REQUEST_CHANGES: ${dismissed.join(", ")}.`
-    );
-  }
-  if (problems.length > 0) {
-    core.setFailed(problems.join(" "));
-  }
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*\[bot\]$/.test(reviewer || ""))
+    throw new Error("A trusted Cadence App reviewer login is required.");
+  if (reviewOutcome !== "success") throw new Error(`Cadence AI review Action outcome: ${reviewOutcome || "unknown"}`);
+  const { assessmentFromUpdate } = await import("./cadence-review-check.mjs");
+  const assessment = assessmentFromUpdate(workpad?.reviewUpdate, request);
+  const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: request.number });
+  if (pr.state !== "open" || pr.head.sha !== request.head)
+    throw new Error("PR closed or reviewed head changed");
+  const { upsertCadenceWorkpad, fetchIssueComments, findCadenceWorkpadComments } = await import("../../../scripts/cadence-linear-workpad.mjs");
+  const saved = await upsertCadenceWorkpad({ issueIdentifier, token, fetchImpl, workpad: {
+    ...workpad, status: "completed", reviewState: "reviewed",
+    reviewUpdate: { ...workpad.reviewUpdate, id: `${request.owner}/${request.repo}:${request.externalId}`, reviewedAt: new Date().toISOString() },
+  } });
+  const readback = await fetchIssueComments(issueIdentifier, token, { fetchImpl });
+  const anchors = findCadenceWorkpadComments(readback.comments);
+  if (!readback.complete || anchors.length !== 1 || anchors[0].id !== saved.commentId || anchors[0].body !== saved.body)
+    throw new Error("Cadence workpad readback mismatch");
+  // A denied workpad write fails the run before any clean verdict is published.
+  assessment.workpadUrl = saved.commentUrl;
+  core.setOutput("assessment", JSON.stringify(assessment));
+  return assessment;
 };
 
 verifyCadenceAiReview.APPROVED_CADENCE_CLAUDE_MODELS =

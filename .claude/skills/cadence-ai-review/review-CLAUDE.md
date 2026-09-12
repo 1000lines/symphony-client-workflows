@@ -36,18 +36,20 @@ repository layout and product language are defined by that repository.
   approval. Minute the decision and review against it; Symphony updates the
   plan/tickets and implements. AI-authored plans/code are peers, not authorities,
   and AI disagreement alone is not a `human-needed` finding.
-- Write detailed review state to the linked issue's single `## Cadence Workpad`
-  through the Cadence Linear workpad helper. Treat each helper write as an
+- Prepare detailed review state for the linked issue's single `## Cadence Workpad`.
+  The workflow persists it through the existing helper. Treat each update as an
   increment on the prior workpad state: use the documented `reviewUpdate` shape
   to generate identifiers for new findings and requirements, add per-item
   updates, report the current overall disposition, report new human input, and
   report new learn-from-human items. Do not create ad hoc Linear comments as a
   substitute for the workpad, edit issue state, edit labels, or mutate other
   Linear metadata.
-- Post one concise PR review per PR: `APPROVE` when there are no `blocker` or
-  `human-needed` findings, otherwise `COMMENT`. Never submit the GitHub
-  `REQUEST_CHANGES` event; if mandatory follow-up remains, record a
-  request-changes disposition in the Linear workpad instead.
+- Write the existing incremental `reviewUpdate` JSON to the workflow's result
+  file, including `githubAssessmentSummary`, current `lastReviewedSha`,
+  `disposition` (`APPROVE` or `COMMENT`), and all open findings. Do not publish
+  GitHub reviews, inline comments, conversation comments or completed Linear
+  updates. The workflow edits the stable App comment and records a bodyless
+  APPROVE only when clean. Never submit `REQUEST_CHANGES`.
 - Keep GitHub-visible text human-readable: a short approval reason, blocker
   explanation, or human-needed question. Put requirement coverage, run state,
   skipped event detail, and AI-to-AI coordination in the workpad.

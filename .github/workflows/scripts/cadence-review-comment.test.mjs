@@ -82,9 +82,9 @@ test("initial creation, duplicate delivery, progress, result and subsequent fail
   f.check.status = "completed";
   f.check.conclusion = "success";
   await f.publish({
-    review: {
-      body: "Looks good.",
-      html_url: "https://github.com/owner/repo/pull/3#pullrequestreview-4",
+    assessment: {
+      githubAssessmentSummary: "Looks good.",
+      workpadUrl: "https://linear.app/issue/100-99#comment-4",
     },
   });
   assert.match(f.comments[0].body, /Cadence · Approved/);
@@ -200,9 +200,9 @@ test("compact assessment links evidence, limits findings, and keeps the footer l
   f.check.status = "completed";
   f.check.conclusion = "action_required";
   const body = renderComment(request, f.check, {
-    review: {
-      body: "Fix the retry.\n\n- first\n- second\n- third\n- fourth",
-      html_url: "https://github.com/owner/repo/pull/3#pullrequestreview-4",
+    assessment: {
+      githubAssessmentSummary: "Fix the retry.\n\n- first\n- second\n- third\n- fourth",
+      workpadUrl: "https://linear.app/issue/100-99#comment-4",
     },
     measurements: {
       model: "observed",
@@ -214,14 +214,14 @@ test("compact assessment links evidence, limits findings, and keeps the footer l
   assert.match(body, /Needs attention/);
   assert.match(body, /Fix the retry/);
   assert.doesNotMatch(body, /fourth|Detailed bookkeeping/);
-  assert.match(body, /Review and evidence/);
+  assert.match(body, /Review evidence/);
   assert.ok(
     body.endsWith(
       "Model: observed · Requested model: requested · Review: 1.2s · Tokens (input: 12, output: 0)"
     )
   );
   assert.ok(
-    renderComment(request, f.check, { review: { body: "x".repeat(10000) } })
+    renderComment(request, f.check, { assessment: { body: "x".repeat(10000) } })
       .length < 2300
   );
 });

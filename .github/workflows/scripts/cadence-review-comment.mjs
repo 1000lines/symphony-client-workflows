@@ -1,4 +1,4 @@
-// Presentation only: the existing check and submitted review own the verdict.
+// Presentation only: the existing App check carries the verified assessment.
 export const COMMENT_MARKER = "<!-- cadence-status -->";
 
 const compact = (text, limit) => {
@@ -66,7 +66,7 @@ export function reviewFooter({
   return parts.join(" · ");
 }
 
-export function renderComment(request, check, { review, measurements } = {}) {
+export function renderComment(request, check, { assessment: result, measurements } = {}) {
   const status =
     check.status === "queued"
       ? "Queued"
@@ -81,7 +81,7 @@ export function renderComment(request, check, { review, measurements } = {}) {
   // Bound the existing human assessment, never interpret its prose as a verdict.
   let points = 0;
   const assessment = compact(
-    String(review?.body || "")
+    String(result?.githubAssessmentSummary || "")
       .split("\n")
       .filter((line) => !/^\s*[-*]\s/.test(line) || ++points <= 3)
       .join("\n"),
@@ -103,7 +103,7 @@ export function renderComment(request, check, { review, measurements } = {}) {
     `[Head ${request.head.slice(0, 7)}](https://github.com/${request.owner}/${
       request.repo
     }/commit/${request.head}) · [Run](${request.runUrl})${
-      review?.html_url ? ` · [Review and evidence](${review.html_url})` : ""
+      result?.workpadUrl ? ` · [Review evidence](${result.workpadUrl})` : ""
     }`,
     footer ? `---\n${footer}` : "",
   ]
@@ -111,41 +111,17 @@ export function renderComment(request, check, { review, measurements } = {}) {
     .join("\n\n");
 }
 
-// Read the persisted check, including on retry/recovery after its write succeeded
-// but comment publication failed. Its linked review is the existing verdict record.
-export async function publishRequestComment(
-  github,
-  request,
-  app,
-  details = {}
-) {
+// Read the persisted check, including retries after check completion succeeded
+// but comment publication failed. Measurements survive job-output loss too.
+export async function publishRequestComment(github, request, app, details = {}) {
   const checks = await github.paginate(github.rest.checks.listForRef, {
-    owner: request.owner,
-    repo: request.repo,
-    ref: request.head,
-    check_name: "Cadence review",
-    app_id: Number(app.id),
-    filter: "all",
-    per_page: 100,
+    owner: request.owner, repo: request.repo, ref: request.head,
+    check_name: "Cadence review", app_id: Number(app.id), filter: "all", per_page: 100,
   });
-  const check = checks.find((item) => item.external_id === request.externalId);
+  const check = checks.find(item => item.external_id === request.externalId);
   if (!check) return { skipped: "missing-check" };
-  const reviewId = check.details_url?.match(/#pullrequestreview-(\d+)$/)?.[1];
-  let review;
-  if (check.status === "completed" && reviewId) {
-    const { data } = await github.rest.pulls.getReview({
-      owner: request.owner,
-      repo: request.repo,
-      pull_number: request.number,
-      review_id: Number(reviewId),
-    });
-    if (
-      data.commit_id === request.head &&
-      data.user?.login === `${app.slug}[bot]`
-    )
-      review = data;
-  }
-  return publishComment(github, request, app, check, { ...details, review });
+  const persisted = JSON.parse(check.output?.text || "{}");
+  return publishComment(github, request, app, check, { ...details, ...persisted });
 }
 
 // Call under the existing per-PR publication lock with the minted App identity.

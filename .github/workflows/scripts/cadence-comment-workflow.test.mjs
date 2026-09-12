@@ -169,15 +169,8 @@ test("real YAML publishes one comment through queued, reviewing, completion, dup
   assert.match(f.comments[0].body, /Queued/);
   assert.equal((await f.run(started)).active, true);
   assert.match(f.comments[0].body, /Reviewing/);
-  f.reviews.push({
-    id: 1,
-    state: "COMMENTED",
-    commit_id: head,
-    user: { login: "cadence[bot]" },
-    body: "- Fix retry handling.",
-    html_url: "https://github.com/owner/repo/pull/3#pullrequestreview-1",
-  });
   await f.run(finished, {
+    REVIEW_ASSESSMENT: JSON.stringify({ requestId: request.externalId, headSha: head, disposition: "COMMENT", humanNeeded: false, githubAssessmentSummary: "- Fix retry handling." }),
     REVIEW_MEASUREMENTS: JSON.stringify({
       model: "observed",
       durationMs: 1200,
@@ -189,6 +182,7 @@ test("real YAML publishes one comment through queued, reviewing, completion, dup
     f.comments[0].body,
     /Needs attention[\s\S]*Fix retry handling[\s\S]*Model: observed/
   );
+  assert.equal(f.reviews.length, 0, "non-approval submits no formal review");
   const body = f.comments[0].body;
   await f.run(finished);
   await f.run(recovered);
@@ -295,4 +289,22 @@ test("footer step uses provider execution measurements and omits prose and missi
   assert.equal(unavailable.model, undefined);
   assert.equal(unavailable.usage, undefined);
   assert.ok(unavailable.durationMs >= 1000);
+});
+
+
+test("assessment and measured footer recover when the check completes but the comment write fails", async t => {
+  const f = fixture(t);
+  await f.run(queued);
+  await f.run(started);
+  const write = f.github.rest.issues.updateComment;
+  f.github.rest.issues.updateComment = async () => { throw new Error("write failed"); };
+  await assert.rejects(f.run(finished, {
+    REVIEW_ASSESSMENT: JSON.stringify({ requestId: request.externalId, headSha: head, disposition: "COMMENT", humanNeeded: false, githubAssessmentSummary: "Retain this finding" }),
+    REVIEW_MEASUREMENTS: JSON.stringify({ durationMs: 1234 }),
+  }), /write failed/);
+  f.github.rest.issues.updateComment = write;
+  await f.run(recovered);
+  assert.match(f.comments[0].body, /Retain this finding[\s\S]*Review: 1.2s/);
+  assert.equal(f.comments.length, 1);
+  assert.equal(f.reviews.length, 0);
 });

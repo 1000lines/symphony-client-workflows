@@ -3,6 +3,8 @@ name: Cadence Review Check Cleanup
 on:
   workflow_call:
     secrets:
+      CADENCE_LINEAR_API_TOKEN:
+        required: true
       CADENCE_APP_PRIVATE_KEY:
         required: true
     inputs:
@@ -84,6 +86,8 @@ jobs:
           permission-checks: write
           permission-pull-requests: write
       - name: Close checks whose run ended without publication
+        env:
+          LINEAR_API_TOKEN: ${{ secrets.CADENCE_LINEAR_API_TOKEN }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           github-token: ${{ steps.app-token.outputs.token }}
@@ -97,4 +101,10 @@ jobs:
               if (String(request.number) !== '${{ matrix.number }}') throw new Error('Recovery pointer does not match the locked PR');
               await recoverCheck(github, context, request, '${{ vars.CADENCE_APP_ID }}', context.payload.workflow_run);
               await publishRequestComment(github, request, { id: '${{ vars.CADENCE_APP_ID }}', slug: '${{ steps.app-token.outputs.app-slug }}' });
+              const { routeCheckHandoff, renderReviewHandoffEvidence } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/cadence-linear-rework.mjs`);
+              const handoff = await routeCheckHandoff({ github, request,
+                app: { id: '${{ vars.CADENCE_APP_ID }}', slug: '${{ steps.app-token.outputs.app-slug }}' },
+                token: process.env.LINEAR_API_TOKEN, githubToken: '${{ steps.app-token.outputs.token }}' });
+              await core.summary.addRaw(renderReviewHandoffEvidence(handoff)).write();
+              if (handoff.operation === 'failed' || handoff.evidenceError) core.setFailed(handoff.error || handoff.evidenceError);
             }
