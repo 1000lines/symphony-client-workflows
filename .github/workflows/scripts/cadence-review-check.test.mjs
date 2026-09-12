@@ -382,7 +382,8 @@ test("workflow puts recoverable admission before review queue and serializes onl
       (step) => step.name === "Save check recovery pointer"
     ) < accept.steps.findIndex((step) => step.id === "queued")
   );
-  for (const job of [accept, review, finish])
+  const session = load("cadence-ai-review-run").jobs;
+  for (const job of [accept, session.start, session.review, finish])
     assert.equal(
       job.steps.find((step) => step.id === "app-token").with[
         "permission-checks"
@@ -396,7 +397,7 @@ test("workflow puts recoverable admission before review queue and serializes onl
     "pull-requests": "write",
   });
   const appToken = finish.steps.find((step) => step.id === "app-token").with;
-  assert.equal(appToken["permission-pull-requests"], "read");
+  assert.equal(appToken["permission-pull-requests"], "write");
   assert.equal(appToken["permission-contents"], undefined);
   assert.equal(appToken["permission-workflows"], undefined);
   const publication = finish.steps.find((step) => step.env?.CHECK_REQUEST);

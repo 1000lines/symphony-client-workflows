@@ -9,11 +9,12 @@ import yaml from 'js-yaml';
 
 const read = name => yaml.load(readFileSync(new URL(`../${name}.yml`, import.meta.url), 'utf8'));
 const trigger = read('cadence-ai-review-trigger');
+const runWorkflow = read('cadence-ai-review-run');
 const keys = ['CADENCE_OPENAI_API_KEY', 'CADENCE_AI_REVIEW_ANTHROPIC_API_KEY'];
-const steps = trigger.jobs.review.steps;
+const steps = runWorkflow.jobs.review.steps;
 const providers = steps.filter(step => /^(openai\/codex-action|anthropics\/claude-code-action)@/.test(step.uses));
-const selected = provider => providers.filter(step => new Function('steps', 'needs', `return ${step.if}`)(
-  { plan: { outputs: { run_claude: 'true' } } }, { accept: { outputs: { provider } } }));
+const selected = provider => providers.filter(step => new Function('steps', 'inputs', `return ${step.if}`)(
+  { plan: { outputs: { run_claude: 'true' } } }, { provider }));
 const verify = createRequire(import.meta.url)('./verify-cadence-ai-review.cjs');
 
 // Exercise the real YAML shell step with secrets delivered through each actual
@@ -102,7 +103,7 @@ test('selected-provider failures cannot use the skipped provider or an older suc
         codex_review: { outcome: provider === 'codex' ? result : 'skipped' },
         cadence_review: { outcome: provider === 'claude' ? result : 'skipped' },
       };
-      const actual = new Function('steps', 'needs', `return ${expression}`)(evaluations, { accept: { outputs: { provider } } });
+      const actual = new Function('steps', 'inputs', `return ${expression}`)(evaluations, { provider });
       assert.equal(actual, result);
       assert.equal(selected(provider).length, 1);
       const errors = [];
@@ -120,7 +121,7 @@ test('selected-provider failures cannot use the skipped provider or an older suc
 });
 
 test('every reusable boundary declares and forwards only named secrets; ingress has none', () => {
-  for (const name of ['cadence-ai-review-trigger', 'cadence-ai-review-events', 'cadence-ai-review', 'cadence-linear-rework', 'cadence-review-check-cleanup']) {
+  for (const name of ['cadence-ai-review-trigger', 'cadence-ai-review-run', 'cadence-ai-review-events', 'cadence-ai-review', 'cadence-linear-rework', 'cadence-review-check-cleanup']) {
     const workflow = read(name);
     assert.equal(workflow.on.workflow_call.secrets.CADENCE_APP_PRIVATE_KEY.required, true);
     for (const job of Object.values(workflow.jobs)) {

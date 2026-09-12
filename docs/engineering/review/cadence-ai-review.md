@@ -151,6 +151,35 @@ PR is still open, so delayed events cannot restart it. Unchanged
 duplicate events may still cause another review. The reviewer reacquires
 current state; its outcome verifier rejects missing or stale-head reviews.
 
+### Current status comment
+
+Cadence keeps one App-owned PR conversation comment, identified by
+`<!-- cadence-status -->` and the minted App identity. It shows queued,
+reviewing, approved/needs-attention, or failed/cancelled status, a short assessment
+with up to three findings, and links to the reviewed head, run and formal review.
+The formal review and structured Linear workpad keep their existing roles and
+history; this comment is presentation, not verdict authority.
+
+Admission, review start, completion and recovery share the existing short per-PR
+publication lock. The native review queue spans the start and assessment jobs in
+`cadence-ai-review-run.yml`; assessment holds no publication lock. Recovery fans
+out by PR from the existing check pointers and takes that same lock. Retries edit
+the comment, and old heads/requests cannot overwrite a newer accepted result.
+A completed comment is preserved during recovery, including its measured footer.
+
+The footer includes observed model/token usage from Claude's execution output
+when available, plus measured review duration. Codex's pinned Action provides no
+structured observed-model/token output here; only an explicitly requested model
+and measured elapsed provider-step time are displayed. Missing measurements are
+omitted; no reviewer estimates or prose scraping supply them. Elapsed step time
+includes the Action's setup, while Claude's reported duration takes precedence.
+
+All comment writers request the Cadence App's existing `pull-requests:write`
+grant; installation grants and the separate repository readiness token are
+unchanged. The caller workflow and `helpers-ref` must reference the same reviewed
+shared revision. Publish/adopt that revision before expecting live comments;
+fixture tests alone do not prove live delivery.
+
 ### Advisory check and human handoff
 
 The reusable reviewer creates `Cadence review` using the configured Cadence
@@ -173,7 +202,7 @@ newer accepted request exists. Already-ready PRs need no transition; findings
 leave a draft unchanged. Admission and final publication share a short native
 per-PR concurrency group; review execution uses its existing separate queue.
 The final job uses a fresh Cadence App token for PR/review reads and check
-publication (`pull-requests:read`, `checks:write`). A separate API client uses
+and comment publication (`pull-requests:write`, `checks:write`). A separate API client uses
 the repository's automatic `GITHUB_TOKEN` for `markPullRequestReadyForReview`.
 The finish job requests `contents:write` and `pull-requests:write`; the event
 and manual reusable-workflow callers must permit both, since a callee cannot

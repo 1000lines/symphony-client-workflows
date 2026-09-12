@@ -111,6 +111,43 @@ export function renderComment(request, check, { review, measurements } = {}) {
     .join("\n\n");
 }
 
+// Read the persisted check, including on retry/recovery after its write succeeded
+// but comment publication failed. Its linked review is the existing verdict record.
+export async function publishRequestComment(
+  github,
+  request,
+  app,
+  details = {}
+) {
+  const checks = await github.paginate(github.rest.checks.listForRef, {
+    owner: request.owner,
+    repo: request.repo,
+    ref: request.head,
+    check_name: "Cadence review",
+    app_id: Number(app.id),
+    filter: "all",
+    per_page: 100,
+  });
+  const check = checks.find((item) => item.external_id === request.externalId);
+  if (!check) return { skipped: "missing-check" };
+  const reviewId = check.details_url?.match(/#pullrequestreview-(\d+)$/)?.[1];
+  let review;
+  if (check.status === "completed" && reviewId) {
+    const { data } = await github.rest.pulls.getReview({
+      owner: request.owner,
+      repo: request.repo,
+      pull_number: request.number,
+      review_id: Number(reviewId),
+    });
+    if (
+      data.commit_id === request.head &&
+      data.user?.login === `${app.slug}[bot]`
+    )
+      review = data;
+  }
+  return publishComment(github, request, app, check, { ...details, review });
+}
+
 // Call under the existing per-PR publication lock with the minted App identity.
 // IDs from GitHub's checks order accepted requests, including same-head reruns.
 export async function publishComment(
@@ -156,6 +193,14 @@ export async function publishComment(
     /check:(\d+) state:(queued|in_progress|completed)/
   );
   const phase = { queued: 0, in_progress: 1, completed: 2 };
+  // Completion is terminal for an accepted check. Cleanup/retry must preserve
+  // its existing findings and measured footer even when job outputs are absent.
+  if (
+    previous &&
+    Number(previous[1]) === check.id &&
+    previous[2] === "completed"
+  )
+    return { id: existing.id, unchanged: true };
   if (
     previous &&
     (Number(previous[1]) > check.id ||

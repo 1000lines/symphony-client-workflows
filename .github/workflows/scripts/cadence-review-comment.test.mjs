@@ -150,7 +150,8 @@ test("late results, old heads, closed PRs and duplicate starts cannot replace cu
       );
     f.check.status = "in_progress";
     const prior = f.comments[0].body;
-    assert.ok((await f.publish()).skipped, scenario);
+    const outcome = await f.publish();
+    assert.ok(outcome.skipped || outcome.unchanged, scenario);
     assert.equal(f.comments[0].body, prior);
     assert.equal(f.writes.length, 1);
   }
