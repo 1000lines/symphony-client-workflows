@@ -145,3 +145,80 @@ test('every reusable boundary declares and forwards only named secrets; ingress 
   }
   assert.doesNotMatch(JSON.stringify(read('cadence-review-ingress')), /secrets|environment|checkout@/);
 });
+
+// Evaluate only checked-in expressions, with GitHub's absent-input empty string.
+const evaluateInput = (expression, inputs = {}) => new Function('inputs', 'toJSON',
+  `return ${expression.replace(/^\$\{\{\s*|\s*\}\}$/g, '').replace(/inputs\.([\w-]+)/g, 'inputs["$1"]')}`)(
+  new Proxy(inputs, { get: (values, key) => values[key] ?? '' }), JSON.stringify);
+
+for (const entry of ['cadence-ai-review', 'cadence-ai-review-events', 'cadence-ai-review-trigger']) {
+  for (const option of [undefined, true, false]) {
+    test(`${entry}: close authority ${option ?? 'default'} survives every applicable hop`, () => {
+      const workflow = read(entry);
+      const declaration = workflow.on.workflow_call.inputs['reconcile-pr-close'];
+      assert.equal(declaration.type, 'boolean');
+      assert.equal(declaration.required, false);
+      assert.equal(declaration.default, true);
+      const inputs = { 'reconcile-pr-close': option ?? declaration.default };
+      if (entry !== 'cadence-ai-review-trigger') {
+        inputs['reconcile-pr-close'] = evaluateInput(workflow.jobs.review.with['reconcile-pr-close'], inputs);
+      }
+      assert.equal(inputs['reconcile-pr-close'], option ?? true);
+      // The reviewer has no close side effect and does not need this input.
+      assert.equal(trigger.jobs.review.with['reconcile-pr-close'], undefined);
+    });
+  }
+  if (entry !== 'cadence-ai-review-trigger') {
+    test(`${entry}: native invocation retains close reconciliation by default`, () => {
+      assert.equal(evaluateInput(read(entry).jobs.review.with['reconcile-pr-close']), true);
+    });
+  }
+}
+
+for (const helperRef of ['v1.0.0', 'a'.repeat(40), undefined]) {
+  test(`all review and wakeup entry points retain helper ref ${helperRef ?? 'default'}`, () => {
+    const visited = new Set();
+    function visit(name, supplied) {
+      const workflow = read(name);
+      const declarations = workflow.on.workflow_call;
+      const inputs = Object.fromEntries(Object.entries(declarations.inputs).map(([key, value]) =>
+        [key, supplied[key] ?? value.default ?? '']));
+      visited.add(name);
+      for (const job of Object.values(workflow.jobs)) {
+        if (job.uses) {
+          // A relative reusable call stays on the containing workflow revision.
+          assert.match(job.uses, /^\.\/\.github\/workflows\/[\w-]+\.yml$/);
+          const nestedName = job.uses.split('/').at(-1).replace(/\.yml$/, '');
+          const nested = read(nestedName).on.workflow_call;
+          assert.deepEqual(Object.keys(job.secrets).sort(), Object.keys(nested.secrets).sort());
+          for (const key of Object.keys(nested.secrets)) {
+            assert.ok(Object.hasOwn(declarations.secrets, key));
+            assert.equal(job.secrets[key], `\${{ secrets.${key} }}`);
+          }
+          assert.ok(job.with['helpers-ref'], 'every nested call must forward the helper revision');
+          const forwarded = evaluateInput(job.with['helpers-ref'], inputs);
+          assert.equal(forwarded, helperRef ?? 'main');
+          visit(nestedName, { 'helpers-ref': forwarded });
+        }
+        for (const step of job.steps || []) {
+          if (!step.uses?.startsWith('actions/checkout@')) continue;
+          assert.equal(step.with['persist-credentials'], false);
+          const scope = { ...inputs, 'helpers-repository': '1000lines/symphony-client-workflows' };
+          const repository = step.with.repository.startsWith('${{')
+            ? evaluateInput(step.with.repository, scope) : step.with.repository;
+          assert.equal(repository, '1000lines/symphony-client-workflows');
+          // The wakeup input is required; the native default is tested separately.
+          if (name !== 'symphony-linear-wakeups' || helperRef) {
+            assert.equal(evaluateInput(step.with.ref, inputs), helperRef ?? 'main');
+          }
+        }
+      }
+    }
+    for (const name of ['cadence-ai-review', 'cadence-ai-review-events', 'cadence-ai-review-trigger',
+      'cadence-linear-rework', 'cadence-review-check-cleanup', 'symphony-linear-wakeups']) {
+      visit(name, { 'helpers-ref': helperRef, 'helpers-repository': '1000lines/symphony-client-workflows' });
+    }
+    assert.equal(visited.size, 7);
+    assert.deepEqual(Object.keys(read('symphony-linear-wakeups').on.workflow_call.secrets), ['CADENCE_LINEAR_API_TOKEN']);
+  });
+}

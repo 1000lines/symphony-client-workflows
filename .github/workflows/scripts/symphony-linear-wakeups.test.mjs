@@ -1372,6 +1372,9 @@ async function runWorkflowFixture(
     checksOverride,
     runOverride = {},
     defaultBranch = "trunk",
+    teamKey = "100",
+    incompleteChecks = false,
+    runFixtures,
     requirements = [
       {
         name: "tooling-check",
@@ -1395,7 +1398,7 @@ async function runWorkflowFixture(
     mergeable: conflict,
   });
   currentPr.mergeable = mergeability;
-  const states = ["Active", "Inactive", "Unhappy", "Done", "Backlog"].map(
+  const states = ["Active", "Inactive", "Unhappy", "Done", "Canceled", "Duplicate", "Evaluating", "Backlog"].map(
     (name) => ({ id: name, name })
   );
   const live = {
@@ -1405,7 +1408,7 @@ async function runWorkflowFixture(
   };
   const issue = () => ({
     id: "issue-502",
-    identifier: "100-502",
+    identifier: `${teamKey}-502`,
     state: states.find((s) => s.name === live.state),
     team: { states: { nodes: states } },
     labels: {
@@ -1423,7 +1426,7 @@ async function runWorkflowFixture(
     if (url.startsWith("https://api.github.com/repos/")) {
       const config = {
         schemaVersion: "symphony-repository/v1",
-        linear: { teamKey: "100" },
+        linear: { teamKey },
         workingDirectory: ".",
         instructions: [],
         commands: {},
@@ -1458,8 +1461,11 @@ async function runWorkflowFixture(
           encoding: "base64",
           content: Buffer.from(JSON.stringify(config)).toString("base64"),
         };
-      else if (url === `${root}/actions/runs/123`)
-        data = workflow({ conclusion: ci || "failure", ...runOverride });
+      else if (url.startsWith(`${root}/actions/runs/`)) {
+        data = runFixtures ? runFixtures[url.split('/').at(-1)]
+          : workflow({ conclusion: ci || "failure", ...runOverride });
+        assert.ok(data, `Unexpected run: ${url}`);
+      }
       else throw new Error(`Unexpected GitHub request: ${url}`);
       return { ok: true, status: 200, json: async () => data };
     }
@@ -1475,7 +1481,7 @@ async function runWorkflowFixture(
                 {
                   commit: {
                     statusCheckRollup: {
-                      contexts: {
+                      contexts: incompleteChecks ? null : {
                         nodes:
                           checksOverride ||
                           (ci || ["check_run", "status"].includes(eventName)
@@ -2303,4 +2309,280 @@ test("actual YAML conflict step forwards a base push through trusted config and 
   assert.match(summaries[0], /maintainer/);
   assert.match(summaries[0], /pr-title/);
   assert.match(summaries[0], /"operation": "updated"/);
+});
+
+// Synthetic ABC/native-CI triples exercise provider compatibility. OT-007 still
+// discovers the live required names, workflows and App IDs before activation.
+const abcRequirements = [
+  {
+    name: "build_and_test",
+    workflow: ".github/workflows/main.yml",
+    appId: 15368,
+  },
+  {
+    name: "storybook_tests",
+    workflow: ".github/workflows/storybook-tests.yml",
+    appId: 15368,
+  },
+];
+function abcCiFixture() {
+  const checksOverride = abcRequirements.map((rule, index) =>
+    check({
+      databaseId: 500 + index,
+      name: rule.name,
+      status: "COMPLETED",
+      conclusion: "SUCCESS",
+      checkSuite: {
+        app: { databaseId: rule.appId },
+        workflowRun: {
+          databaseId: 123 + index,
+          runAttempt: 1,
+          file: { path: rule.workflow },
+          workflow: { id: `workflow-${index}` },
+        },
+      },
+    })
+  );
+  return {
+    teamKey: "ABC",
+    prTitle: "[ABC-502]: provider compatibility",
+    prBranch: "symphony/pink/ABC-502/fix",
+    defaultBranch: "main",
+    forwarded: true,
+    eventName: "workflow_run",
+    ci: "success",
+    currentState: "Unhappy",
+    labelIds: ["pink", "unrelated", "wake"],
+    requirements: structuredClone(abcRequirements),
+    checksOverride,
+    runOverride: { path: abcRequirements[0].workflow },
+    runFixtures: Object.fromEntries(
+      abcRequirements.map((rule, index) => [
+        123 + index,
+        workflow({
+          id: 123 + index,
+          path: rule.workflow,
+          conclusion: "success",
+        }),
+      ])
+    ),
+  };
+}
+
+for (const [name, change, expected] of [
+  ["all configured checks pass", () => {}, "Inactive"],
+  ["missing Storybook check", (o) => o.checksOverride.pop(), "Unhappy"],
+  [
+    "missing all checks",
+    (o) => {
+      o.checksOverride = [];
+    },
+    "Unhappy",
+  ],
+  [
+    "incomplete check read",
+    (o) => {
+      o.incompleteChecks = true;
+    },
+    "Unhappy",
+  ],
+  [
+    "pending workflow",
+    (o) => {
+      o.runFixtures[124].status = "in_progress";
+    },
+    "Unhappy",
+  ],
+  [
+    "pending check",
+    (o) => {
+      o.checksOverride[1].status = "IN_PROGRESS";
+      o.checksOverride[1].conclusion = null;
+    },
+    "Unhappy",
+  ],
+  [
+    "wrong check name",
+    (o) => {
+      o.checksOverride[1].name = "storybook";
+    },
+    "Unhappy",
+  ],
+  [
+    "wrong emitting App",
+    (o) => {
+      o.checksOverride[1].checkSuite.app.databaseId = 999;
+    },
+    "Unhappy",
+  ],
+  [
+    "wrong workflow",
+    (o) => {
+      o.checksOverride[1].checkSuite.workflowRun.file.path =
+        ".github/workflows/other.yml";
+    },
+    "Unhappy",
+  ],
+  [
+    "stale run head",
+    (o) => {
+      o.runFixtures[124].head_sha = base;
+    },
+    "Unhappy",
+  ],
+  [
+    "failed workflow",
+    (o) => {
+      o.runFixtures[124].conclusion = "failure";
+    },
+    "Active",
+  ],
+  [
+    "failed required check",
+    (o) => {
+      o.checksOverride[1].conclusion = "FAILURE";
+    },
+    "Active",
+  ],
+  [
+    "unknown mergeability",
+    (o) => {
+      o.mergeability = null;
+    },
+    "Unhappy",
+  ],
+  [
+    "unknown final mergeability",
+    (o) => {
+      o.changedMergeability = null;
+    },
+    "Unhappy",
+  ],
+  [
+    "foreign workflow event",
+    (o) => {
+      o.runOverride.head_repository = { full_name: "foreign/repository" };
+    },
+    undefined,
+  ],
+  [
+    "stale event head",
+    (o) => {
+      o.runOverride.head_sha = base;
+    },
+    undefined,
+  ],
+  [
+    "final head race",
+    (o) => {
+      o.changedHead = true;
+    },
+    undefined,
+  ],
+  [
+    "final state race",
+    (o) => {
+      o.changedState = "Active";
+    },
+    undefined,
+  ],
+  [
+    "final terminal race",
+    (o) => {
+      o.changedState = "Done";
+    },
+    undefined,
+  ],
+  [
+    "active worker",
+    (o) => {
+      o.currentState = "Active";
+    },
+    undefined,
+  ],
+  [
+    "timer owns evaluating",
+    (o) => {
+      o.currentState = "Evaluating";
+    },
+    undefined,
+  ],
+  ...["Done", "Canceled", "Duplicate"].map((state) => [
+    `terminal ${state}`,
+    (o) => {
+      o.currentState = state;
+    },
+    undefined,
+  ]),
+]) {
+  test(`ABC reusable CI: ${name}`, async (t) => {
+    const options = abcCiFixture();
+    change(options);
+    const result = await runWorkflowFixture(t, options);
+    const updates = result.writes.filter((write) => write.kind === "state");
+    assert.equal(updates.length, expected ? 1 : 0);
+    if (!expected) return;
+    assert.equal(result.outputs.ticket.issue, "ABC-502");
+    assert.deepEqual(
+      updates[0].input,
+      expected === "Unhappy"
+        ? { stateId: expected }
+        : { stateId: expected, removedLabelIds: ["wake"] }
+    );
+    assert.deepEqual(
+      result.issue.labels.nodes.map((label) => label.id),
+      expected === "Unhappy"
+        ? ["pink", "unrelated", "wake"]
+        : ["pink", "unrelated"]
+    );
+  });
+}
+
+test("Scratch-v2 completion stays with the narrowed native listener even when a PR shares its head", async (t) => {
+  const options = abcCiFixture();
+  options.runOverride = {
+    event: "workflow_dispatch",
+    path: ".github/workflows/e2e-scratch-v2.yml",
+    display_title: "[linear:ABC-638] E2E Scratch v2",
+    head_branch: "symphony/pink/ABC-502/fix",
+  };
+  const result = await runWorkflowFixture(t, options);
+  assert.deepEqual(result.writes, []);
+  assert.ok(
+    result.infos.some((message) =>
+      message.includes("outside the configured CI contract")
+    )
+  );
+  const resolved = resolveIssue({
+    ticketNumber: workflowTicketImpl(workflow(options.runOverride), "ABC"),
+    pullRequests: [pr({ title: "[ABC-502]: source PR" })],
+    teamKey: "ABC",
+  });
+  assert.deepEqual(resolved, {
+    issueIdentifier: "ABC-638",
+    identitySource: "ticket_number",
+  });
+});
+
+test("shared completion helper does not claim ticketed Scratch-v2 runs on main", async () => {
+  const plans = await planWakeups({
+    repo,
+    teamKey: "ABC",
+    eventName: "workflow_run",
+    payload: {
+      action: "completed",
+      workflow_run: workflow({
+        event: "workflow_dispatch",
+        head_branch: "main",
+        path: ".github/workflows/deploy-scratch-v2.yml",
+        display_title: "[linear:ABC-638] Deploy Scratch v2",
+      }),
+    },
+    github: new Proxy(
+      {},
+      { get: () => assert.fail("main completion must not read a PR") }
+    ),
+  });
+  assert.equal(plans[0].shouldWake, false);
+  assert.equal(plans[0].skippedReason, "workflow-not-issue-scoped");
 });

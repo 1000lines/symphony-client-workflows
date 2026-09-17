@@ -2,13 +2,37 @@
 
 The existing `cadence-ai-review-trigger.yml` receives `pull_request_target.closed`
 (including merges), directly here and through the client template's reusable
-caller. Its independent `reconcile-closed` job runs ordinary JavaScript without
+caller. Unless the caller opts out, its independent `reconcile-closed` job runs ordinary JavaScript without
 a model, provider credential, review gate, or PR-author/label restriction. Closing
 still cancels the PR's pending Cadence review through the separate existing job.
 
 The job reads `.symphony.cfg.json` from the caller's current default branch and
 uses its Linear team. Helpers are checked out from the trusted shared repository
 at `helpers-ref` (normally `main`), never from the PR. No PR code executes.
+
+## Caller-owned acceptance
+
+The reusable manual (`cadence-ai-review.yml`), events
+(`cadence-ai-review-events.yml`) and trigger (`cadence-ai-review-trigger.yml`)
+entry points accept optional boolean `reconcile-pr-close`, default `true`.
+Manual/events forward it to the trigger; false skips `reconcile-closed` before
+any checkout, configuration read or Linear access. `cancel-closed` remains
+independent and still cancels pending review work. Native provider events and
+existing callers that omit the input retain their current behavior.
+
+orc-app must set `reconcile-pr-close: false` on all three callers. Its human or
+accepted external automation owns Done/Canceled; merging shared source does not
+confer acceptance authority. The opt-out does not alter native Linear automation,
+CI/review routing, or other clients' policy. It is a trusted workflow input, not
+a new `.symphony.cfg.json` field. See the [exact caller wiring and release
+handoff](../../../README.md#external-acceptance-authority-and-pinned-callers).
+
+The provider uses `toJSON(inputs.reconcile-pr-close) != 'false'` to distinguish
+an explicit boolean false from the absent input on native events. A truthy
+fallback (`input || true`) would discard the opt-out; a loose comparison with
+boolean false would also treat native empty input as false. Fixtures exercise
+both native defaults and all reusable forwarding paths. The decision rules below
+apply only when reconciliation is enabled.
 
 ## Decision and association rules
 
@@ -98,8 +122,9 @@ outside its access cause a visible failure and no terminal write. The code does
 not mint broader tokens or assume inaccessible repositories are closed.
 
 Existing clients consuming the shared trigger and helpers from `main` receive
-this behavior on their next close event after merge; no new template caller is
-needed. The caller must already be installed/enabled on the client's default
+this behavior on their next close event after merge unless opted out; no new
+template caller is needed for the default. Pinned clients select a reviewed
+workflow revision and matching `helpers-ref` before activation. The caller must already be installed/enabled on the client's default
 branch. GitHub's
 [`pull_request_target` behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request_target)
 means a PR's changed workflow is not a pre-merge live listener. Do not close an

@@ -14,7 +14,7 @@ import {
   terminalStateReason,
   wakeLinearIssue,
 } from "../../../scripts/linear-issue-wakeup.mjs";
-import { loadRepositoryConfig } from "../../../scripts/symphony/review-contract.mjs";
+import { loadRepositoryConfig } from "../../../scripts/symphony/repository-config.mjs";
 
 const failed = (value) =>
   [
