@@ -175,7 +175,7 @@ for (const entry of ['cadence-ai-review', 'cadence-ai-review-events', 'cadence-a
   }
 }
 
-for (const helperRef of ['v1.0.0', 'a'.repeat(40), undefined]) {
+for (const helperRef of ['v0.1.0', 'a'.repeat(40), undefined]) {
   test(`all review and wakeup entry points retain helper ref ${helperRef ?? 'default'}`, () => {
     const visited = new Set();
     function visit(name, supplied) {

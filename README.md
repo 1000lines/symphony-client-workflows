@@ -111,8 +111,17 @@ contract cannot establish passing CI. Existing behavior remains pending/missing/
 incomplete → Unhappy + wake:15m, success → Inactive, failure/conflict → Active;
 leaving CI wait removes only the wake label and retains other labels.
 
-OT-005 publishes the immutable workflow release **after this change is reviewed
-and merged** and records the merged provider SHA, tag/peeled SHA and PROVIDER CI.
+Jeremy selected `v0.1.0` as the immutable release tag for this adoption,
+superseding the plan's `v1.0.0` default; do not create a `v1` alias. Readback on
+2026-09-17 found `v0.1.0` already pointing directly to commit
+`de1a5cfe722471e2637f76dc2a5a5a4c1b45dd6b`, which predates this compatibility
+change and does not accept `reconcile-pr-close`. It cannot supply the opt-out
+above. Keep that tag unchanged; the `<release>` placeholder remains pending
+OT-005's resolution of the selected tag versus required compatibility.
+
+OT-005 owns compatible release delivery **after this change is reviewed and
+merged**, including that tag mismatch, the merged provider SHA, tag/peeled SHA
+and PROVIDER CI.
 OT-007 consumes that release, applies the opt-out above, verifies named secret
 scope and controller default-branch restrictions, and owns the actual CI triples.
 Local compatibility fixtures are not live caller, App, review or timer evidence;
