@@ -5,7 +5,7 @@
     "node": ">=20.19.0"
   },
   "scripts": {
-    "test": "node --test scripts/*.test.mjs scripts/symphony/*.test.mjs .github/workflows/scripts/*.test.mjs scripts/symphony/runtime-bundle/review-axes/*.test.mjs"
+    "test": "node --test scripts/*.test.mjs scripts/symphony/*.test.mjs scripts/project-folder-cleanup/*.test.mjs .github/workflows/scripts/*.test.mjs scripts/symphony/runtime-bundle/review-axes/*.test.mjs"
   },
   "dependencies": {
     "js-yaml": "4.3.2"
