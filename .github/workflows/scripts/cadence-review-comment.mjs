@@ -193,14 +193,17 @@ export async function publishRequestComment(
   )
     return { ...published, hideSkipped: "closed-stale-or-newer-request" };
   const query = `query($id: ID!) { node(id: $id) { ... on PullRequestReview {
-    id body author { login } commit { oid } isMinimized minimizedReason
+    id body author { ... on Node { id } } commit { oid } isMinimized minimizedReason
   } } }`;
   const read = async () =>
     (await github.graphql(query, { id: review.node_id })).node;
   const original = await read();
+  // GraphQL Bot logins omit REST's [bot] suffix. Match the verified REST
+  // author's stable node ID instead of comparing their display logins.
   if (
     original?.id !== review.node_id ||
-    original.author?.login !== `${app.slug}[bot]` ||
+    !review.user?.node_id ||
+    original.author?.id !== review.user.node_id ||
     original.commit?.oid !== request.head ||
     original.body !== review.body
   )
