@@ -20,12 +20,12 @@ any checkout, configuration read or Linear access. `cancel-closed` remains
 independent and still cancels pending review work. Native provider events and
 existing callers that omit the input retain their current behavior.
 
-orc-app must set `reconcile-pr-close: false` on all three callers. Its human or
-accepted external automation owns Done/Canceled; merging shared source does not
-confer acceptance authority. The opt-out does not alter native Linear automation,
-CI/review routing, or other clients' policy. It is a trusted workflow input, not
-a new `.symphony.cfg.json` field. See the [exact caller wiring and release
-handoff](../../../README.md#external-acceptance-authority-and-pinned-callers).
+For example, a client that reserves Done/Canceled transitions for humans or
+external automation can set `reconcile-pr-close: false` on all three callers.
+That client's existing process retains acceptance authority. The opt-out does
+not alter native Linear automation, CI/review routing, or other clients' policy.
+It is a trusted workflow input, not a new `.symphony.cfg.json` field. See the
+[caller wiring and release guidance](../../../README.md#external-acceptance-authority-and-pinned-callers).
 
 The provider uses `toJSON(inputs.reconcile-pr-close) != 'false'` to distinguish
 an explicit boolean false from the absent input on native events. A truthy

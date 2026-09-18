@@ -47,18 +47,18 @@ entry points:
 | `cadence-ai-review-events.yml`  | Ingress event → trigger       |
 | `cadence-ai-review-trigger.yml` | Gates only `reconcile-closed` |
 
-Set `reconcile-pr-close: false` on **all three orc-app callers**, including the
-one receiving `pull_request_target.closed`. This is the accepted orc-app policy:
-human/accepted external automation retains Done/Canceled authority. A source
-merge alone must not replace that authority. False skips the close job before
-checkout, configuration reads or Linear access; closing still cancels pending
+For example, a client whose humans or external automation own Done/Canceled
+transitions can set `reconcile-pr-close: false` on **all three entry-point
+callers**, including the one receiving `pull_request_target.closed`. This keeps
+acceptance authority with that client's existing process. False skips the close
+job before checkout, configuration reads or Linear access; closing still cancels pending
 Cadence review work. Review, CI, conflict wakeups and their terminal guards
 continue independently. Other clients retain existing close reconciliation
 unless they explicitly opt out; native provider events retain the same default.
 
 For example, the trigger caller's job wiring is below. `<release>` is an
-inspection placeholder: replace both occurrences with OT-005's delivered tag or
-full commit, not a task branch or PR head. This document does not publish a tag.
+inspection placeholder: replace both occurrences with a reviewed immutable
+release tag or full commit that supports this input, not a task branch or PR head.
 The existing caller retains its event and permission declarations.
 
 ```yaml
@@ -99,9 +99,10 @@ only a pinned top-level `uses` is insufficient. Keep all six public review/wakeu
 entry points in the table pinned to the same delivered revision. The internal
 `cadence-ai-review-run.yml` stays on that revision through relative calls.
 Cleanup and Linear rework do not reconcile PR closure and need no close-policy
-input. Setup and ingress stay native. No generated command CI is needed for
-orc-app: retain its application/Storybook CI and discover the actual required
-name/workflow/App-ID triples before activating selected-base config.
+input. Setup and ingress stay native. Clients whose existing application CI
+covers their configured commands can retain it without adding generated command
+CI. Discover the actual required name/workflow/App-ID triples before activating
+selected-base config.
 
 `scripts/symphony/repository-config.mjs` provides the shared selected-base reader
 and validator; existing review-contract imports remain supported. CI/close code
@@ -111,29 +112,21 @@ contract cannot establish passing CI. Existing behavior remains pending/missing/
 incomplete → Unhappy + wake:15m, success → Inactive, failure/conflict → Active;
 leaving CI wait removes only the wake label and retains other labels.
 
-Jeremy selected `v0.1.0` as the immutable release tag for this adoption,
-superseding the plan's `v1.0.0` default; do not create a `v1` alias. Readback on
-2026-09-17 found `v0.1.0` already pointing directly to commit
-`de1a5cfe722471e2637f76dc2a5a5a4c1b45dd6b`, which predates this compatibility
-change and does not accept `reconcile-pr-close`. It cannot supply the opt-out
-above. Keep that tag unchanged; the `<release>` placeholder remains pending
-OT-005's resolution of the selected tag versus required compatibility.
+Before pinning callers, verify that the chosen release contains the required
+interfaces and has passing provider CI. Record its tag and resolved commit SHA;
+do not move an existing immutable tag. Verify named secret scope, controller
+default-branch restrictions and required-check identities in the client
+repository. Keep client-specific release choices and rollout records there.
+Local compatibility fixtures do not establish live caller, App, review or timer
+behavior; verify those in the adopting client's environment.
 
-OT-005 owns compatible release delivery **after this change is reviewed and
-merged**, including that tag mismatch, the merged provider SHA, tag/peeled SHA
-and PROVIDER CI.
-OT-007 consumes that release, applies the opt-out above, verifies named secret
-scope and controller default-branch restrictions, and owns the actual CI triples.
-Local compatibility fixtures are not live caller, App, review or timer evidence;
-OT-009 owns that verification. Do not move an existing tag or infer human approval
-from a passing provider fixture.
-
-## Scratch-v2 completion ownership
+## Issue-scoped workflow completion ownership
 
 The provider helper exports `workflowTicket`, `resolveIssue`, and `runBridge`.
 For dispatched completions on Symphony branches it recognizes the anchored
-`[linear:ABC-N] ` run-title marker, with explicit ticket ownership taking
-precedence over a PR title and then branch identity. Its final run re-read,
+`[linear:TEAM-N] ` run-title marker (using the configured team and issue number),
+with explicit ticket ownership taking precedence over a PR title and then branch
+identity. Its final run re-read,
 run-attempt receipt and terminal guard protect against stale, duplicate and
 terminal events. It currently rejects completions outside `symphony/` branches,
 even with a marker.
@@ -142,14 +135,13 @@ The reusable `symphony-linear-wakeups.yml` calls `runBridge` only for conflicts
 (`pull_request_target`, base push, schedule). Its separate CI path looks for an
 open PR at the event head and requires a configured CI workflow; it does **not**
 invoke the issue-owned dispatched-completion path. A ticket marker alone does
-not add that support, and Scratch-v2 must not be added to ordinary required CI
-just to produce a wakeup.
+not add that support. Issue-scoped deployment or E2E workflows should not be
+added to ordinary required CI just to produce a wakeup.
 
-**OT-007 must retain a narrowed native handler** for orc-app's
-`.github/workflows/deploy-scratch-v2.yml` and
-`.github/workflows/e2e-scratch-v2.yml` completions. Preserve the existing
-`ticket_number` → anchored marker, including ticketed default-branch runs with
-no source PR. The ticket owns the completion even when a different issue owns
+Clients that need these completion wakeups must retain a **narrowed native
+handler** for their ticketed deployment or E2E workflows. Preserve the explicit
+ticket input → anchored marker, including ticketed default-branch runs with no
+source PR. The ticket owns the completion even when a different issue owns
 a PR at the same head. Retain same-repository, dispatch/completed-event,
 workflow-path, current run/attempt, deduplication and terminal-state checks.
 Remove ordinary CI, check/status, PR-conflict and scheduled-conflict listeners
