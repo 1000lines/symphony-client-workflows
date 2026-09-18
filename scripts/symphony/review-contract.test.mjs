@@ -440,3 +440,9 @@ test("identical completed generation coalesces; retries require explicit operati
   assert.equal(queueReviewGeneration(state, gen, { checkId: 999 }), state);
   assert.throws(() => queueReviewGeneration(state, gen, { checkId: 999, operationalRetry: true }), /unavailable/);
 });
+
+test('review and CI share one selected-base configuration loader', async () => {
+  const configuration = await import('./repository-config.mjs');
+  assert.equal(loadRepositoryConfig, configuration.loadRepositoryConfig);
+  assert.equal(loadRepositoryMapping, configuration.loadRepositoryMapping);
+});

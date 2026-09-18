@@ -33,6 +33,11 @@ on:
       CADENCE_LINEAR_API_TOKEN:
         required: false
     inputs:
+      reconcile-pr-close:
+        description: "Reconcile Done/Canceled on PR close; false retains the caller's external acceptance authority."
+        type: boolean
+        required: false
+        default: true
       helpers-ref:
         description: "Reviewed symphony-client-workflows revision providing the trusted review helpers."
         type: string
@@ -65,7 +70,10 @@ env:
 jobs:
   reconcile-closed:
     name: Reconcile Linear after PR close
-    if: github.event_name == 'pull_request_target' && github.event.action == 'closed'
+    # Native events have no input; only an explicit boolean false opts out.
+    if: >-
+      github.event_name == 'pull_request_target' && github.event.action == 'closed' &&
+      toJSON(inputs.reconcile-pr-close) != 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

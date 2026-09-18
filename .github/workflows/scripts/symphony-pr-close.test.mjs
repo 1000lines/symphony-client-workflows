@@ -247,7 +247,7 @@ test("the existing close workflow runs the deterministic helper with only read G
   const workflow = yaml.load(readFileSync(new URL("../cadence-ai-review-trigger.yml", import.meta.url), "utf8"));
   assert.ok(workflow.on.pull_request_target.types.includes("closed"));
   const job = workflow.jobs["reconcile-closed"];
-  assert.equal(job.if, "github.event_name == 'pull_request_target' && github.event.action == 'closed'");
+  assert.match(job.if, /toJSON\(inputs.reconcile-pr-close\) != 'false'/);
   assert.equal(job.needs, undefined);
   assert.equal(job.environment, undefined);
   assert.deepEqual(job.permissions, { contents: "read", "pull-requests": "read" });
@@ -282,3 +282,34 @@ test("the existing close workflow runs the deterministic helper with only read G
   assert.match(summary, /"eventToCompletionMs": \d+/);
   assert.equal(prReference(`${url}?tab=files#diff`).url, url);
 });
+
+for (const enabled of [undefined, true, false]) {
+  for (const merged of [false, true]) {
+    test(`close job: ${merged ? 'merged' : 'abandoned'} PR with reconciliation ${enabled ?? 'native default'}`, async () => {
+      const workflow = yaml.load(readFileSync(new URL('../cadence-ai-review-trigger.yml', import.meta.url), 'utf8'));
+      const github = { event_name: 'pull_request_target', event: { action: 'closed' } };
+      const inputs = { 'reconcile-pr-close': enabled ?? '' };
+      const condition = workflow.jobs['reconcile-closed'].if.replace(/inputs\.([\w-]+)/g, 'inputs["$1"]');
+      const shouldReconcile = new Function('github', 'inputs', 'toJSON', `return ${condition}`)(github, inputs, JSON.stringify);
+      const cancel = new Function('github', `return ${workflow.jobs['cancel-closed'].if}`)(github);
+      assert.equal(shouldReconcile, enabled !== false);
+      assert.equal(cancel, true, 'opting out still cancels pending review work');
+      for (const state of ['Inactive', 'Unhappy', 'Active', 'Done', 'Canceled', 'Duplicate']) {
+        const f = fixture([pr(1, { merged })]);
+        f.issue.state = { id: state, name: state, type: 'unstarted' };
+        if (shouldReconcile) await f.run();
+        if (enabled === false) {
+          assert.equal(f.issue.state.name, state);
+          assert.deepEqual(f.writes, []);
+          assert.deepEqual(f.reads, []);
+          assert.deepEqual(f.calls, []);
+        } else {
+          assert.equal(f.issue.state.name, merged ? 'Done' : 'Canceled');
+          assert.equal(f.writes.length, 1);
+        }
+      }
+      github.event.action = 'review_requested';
+      assert.equal(new Function('github', 'inputs', 'toJSON', `return ${condition}`)(github, inputs, JSON.stringify), false);
+    });
+  }
+}

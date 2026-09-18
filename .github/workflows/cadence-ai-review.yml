@@ -14,6 +14,11 @@ on:
       CADENCE_LINEAR_API_TOKEN:
         required: false
     inputs:
+      reconcile-pr-close:
+        description: "Reconcile Done/Canceled on PR close; false retains the caller's external acceptance authority."
+        type: boolean
+        required: false
+        default: true
       helpers-ref:
         description: "Reviewed symphony-client-workflows revision providing the trusted review helpers."
         type: string
@@ -124,6 +129,8 @@ jobs:
         pr_number: ${{ fromJson(needs.resolve.outputs.pr_numbers) }}
     uses: ./.github/workflows/cadence-ai-review-trigger.yml
     with:
+      # Native events have no input; preserve false without a truthy fallback.
+      reconcile-pr-close: ${{ toJSON(inputs.reconcile-pr-close) != 'false' }}
       helpers-ref: ${{ inputs.helpers-ref || 'main' }}
       pr_number: ${{ matrix.pr_number }}
       trigger_source: workflow_dispatch.group

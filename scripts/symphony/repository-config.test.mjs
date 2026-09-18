@@ -7,7 +7,7 @@ import test from "node:test";
 import {
   inspectConfig,
   validateConfig,
-} from "./runtime-bundle/skills/symphony-repository/scripts/config.mjs";
+} from "./repository-config.mjs";
 
 const config = () => ({
   schemaVersion: "symphony-repository/v1",
@@ -150,4 +150,42 @@ test("inspection reads fetched base, ignoring task and working-tree proposals", 
   git("commit", "-m", "symlink config");
   git("update-ref", "refs/remotes/origin/trunk", "HEAD");
   assert.throws(() => inspectConfig(dir, "trunk"), /regular file/);
+});
+
+test("ABC native config retains commands and exact CI triples without changing acceptance authority", () => {
+  const value = config();
+  value.linear.teamKey = "ABC";
+  value.instructions = ["SYMPHONY.md"];
+  value.commands = {
+    setup: [["npm", "ci"]],
+    lint: [["npm", "run", "lint"]],
+    test: [["npm", "test"]],
+    build: [["npm", "run", "build"]],
+  };
+  value.ci = {
+    mode: "native",
+    requiredChecks: [
+      {
+        name: "build_and_test",
+        workflow: ".github/workflows/main.yml",
+        appId: 15368,
+      },
+      {
+        name: "storybook_tests",
+        workflow: ".github/workflows/storybook-tests.yml",
+        appId: 15368,
+      },
+    ],
+  };
+  assert.equal(validateConfig(value), value);
+  // PR-close authority is a reviewed workflow input, not a task-head config field.
+  assert.throws(
+    () => validateConfig({ ...value, "reconcile-pr-close": false }),
+    /configuration fields/
+  );
+  for (const field of ["name", "workflow", "appId"]) {
+    const invalid = structuredClone(value);
+    delete invalid.ci.requiredChecks[0][field];
+    assert.throws(() => validateConfig(invalid));
+  }
 });
