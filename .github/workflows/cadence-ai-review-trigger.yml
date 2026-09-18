@@ -3,6 +3,14 @@ name: Cadence AI Review Trigger
 # Event and manual callers invoke this reusable workflow directly. Keep the
 # review-request entry point for existing integrations until they migrate.
 
+# Review-completion integration: https://linear.app/1000lines/issue/100-77
+# Wait for 100-76's trusted publisher and mutation-surface handoff on main:
+# https://github.com/1000lines/symphony-client-workflows/pull/6
+# Its durable result must correlate the review, head, request/run and accepted
+# feedback before compact publication, fresh readiness and completion reactions
+# can be wired here. Request-receipt completion alone is not a review verdict.
+# Resume 100-77 after that handoff; 100-78 owns release and live reaction proof.
+
 on:
   pull_request_target:
     types: [review_requested, closed]
